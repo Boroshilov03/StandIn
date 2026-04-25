@@ -112,6 +112,9 @@ function AttentionBoard({ tweaks }) {
         <div className="cards">
           {filtered.length === 0 && (
             <div className="empty">
+              <div className="empty-icon">
+                <Icon name="check" size={22}/>
+              </div>
               <div className="big">All clear.</div>
               <div>No pending items match the current filter. Agents will surface new ones here as they arrive.</div>
             </div>
@@ -171,7 +174,7 @@ function TicketCard({ ticket, state, onResolve, onReject }) {
         <button className="btn primary" onClick={onResolve} aria-label="Resolve">
           <Icon name="check" size={14}/> Resolve
         </button>
-        <button className="btn ghost" onClick={onReject} aria-label="Reject" style={{color: 'var(--fg-2)'}}>
+        <button className="btn reject" onClick={onReject} aria-label="Reject">
           Reject
         </button>
         <button className="btn ghost" style={{justifyContent:'center'}}>View evidence</button>

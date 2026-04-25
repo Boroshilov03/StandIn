@@ -11,9 +11,9 @@ function HealthBar({ route, setRoute, counts }) {
   const source = window.MOCK_API.getSource();
 
   const tabs = [
-    { id: 'attention', label: 'Attention',     count: counts.attention },
-    { id: 'graph',     label: 'Team graph',    count: counts.graph },
-    { id: 'monitor',   label: 'Orchestration', count: counts.feed },
+    { id: 'attention', label: 'Attention',     count: counts.attention, kbd: '1' },
+    { id: 'graph',     label: 'Team graph',    count: counts.graph,     kbd: '2' },
+    { id: 'monitor',   label: 'Orchestration', count: counts.feed,      kbd: '3' },
   ];
 
   return (
@@ -31,6 +31,7 @@ function HealthBar({ route, setRoute, counts }) {
                   aria-current={route === t.id ? 'page' : undefined}>
             {t.label}
             <span className="count tabular">{t.count}</span>
+            <span className="nav-kbd">{t.kbd}</span>
           </button>
         ))}
       </nav>
