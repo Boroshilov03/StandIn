@@ -23,6 +23,7 @@ import os
 import sys
 import uuid
 from datetime import datetime, UTC
+from pathlib import Path
 
 from dotenv import load_dotenv
 from uagents import Agent, Context
@@ -44,6 +45,17 @@ from models import (
     RejectRequest,
     RejectResponse,
 )
+
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from services.calendarService import createEvent
+    from services.slackService import postAsUser
+except Exception:
+    createEvent = None
+    postAsUser = None
 
 # ---------------------------------------------------------------------------
 # Agent
@@ -169,14 +181,19 @@ async def _action_send_slack(action_id: str, payload: dict, priority: str) -> tu
 
     payload: { channel: str, text: str, thread_ts?: str }
     """
-    channel = payload.get("channel", "#general")
-    text    = payload.get("text", "")[:80]
-    agent.logger.info(
-        f"[STUB] send_slack | channel={channel} | text='{text}...' | "
-        f"priority={priority} — Slack MCP not connected"
-    )
-    result = f"[stub] Slack message to {channel} queued."
-    return True, result, True
+    channel = payload.get("channel")
+    text = payload.get("text", "")
+    user_id = payload.get("user_id", "alice.chen")
+    if postAsUser is None:
+        result = "Slack service unavailable (missing dependencies or import path)."
+        return False, result, True
+    try:
+        response = postAsUser(user_id, text, channel)
+        ts = response.get("ts", "unknown")
+        result = f"Slack message posted as {user_id} to {channel}. ts={ts}"
+        return True, result, False
+    except Exception as exc:
+        return False, f"Slack send failed: {exc}", False
 
 
 async def _action_draft_slack(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
@@ -235,15 +252,30 @@ async def _action_schedule_meeting(action_id: str, payload: dict, priority: str)
 
     payload: { title: str, attendees: list[str], start_time: str, duration_minutes: int, description?: str }
     """
-    title     = payload.get("title", "Meeting")
-    attendees = payload.get("attendees", [])
-    start     = payload.get("start_time", "")
-    agent.logger.info(
-        f"[STUB] schedule_meeting | title='{title}' | attendees={attendees} | "
-        f"start={start} — Google Calendar MCP not connected"
-    )
-    result = f"[stub] '{title}' with {attendees} at {start} would be scheduled."
-    return True, result, True
+    if createEvent is None:
+        result = "Calendar service unavailable (missing dependencies or import path)."
+        return False, result, True
+    try:
+        owner_user_id = payload.get("owner_user_id", "alice.chen")
+        event_details = {
+            "meetingId": payload.get("meeting_id"),
+            "summary": payload.get("title", "Meeting"),
+            "description": payload.get("description", ""),
+            "start": {
+                "dateTime": payload.get("start_time"),
+                "timeZone": payload.get("time_zone", "America/Los_Angeles"),
+            },
+            "end": {
+                "dateTime": payload.get("end_time"),
+                "timeZone": payload.get("time_zone", "America/Los_Angeles"),
+            },
+            "attendees": [{"email": email} for email in payload.get("attendees", [])],
+        }
+        created = createEvent(owner_user_id, event_details)
+        result = f"Calendar event created. eventId={created.get('id')}"
+        return True, result, False
+    except Exception as exc:
+        return False, f"Calendar scheduling failed: {exc}", False
 
 
 async def _action_create_action_item(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
