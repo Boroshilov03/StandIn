@@ -126,6 +126,15 @@ class ActionRequest(Model):
     payload: str        # JSON-serialised dict — caller must json.dumps()
     context: Optional[str] = None
     priority: Optional[str] = "normal"  # "normal" | "urgent"
+    # Dashboard card metadata — orchestrator should populate these so the
+    # approval UI can show rich card info without a separate lookup.
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    team: Optional[str] = None
+    owner: Optional[str] = None       # user ID (e.g. "derek.vasquez")
+    owner_name: Optional[str] = None  # display name
+    ticket_status: Optional[str] = None  # "blocked" | "in_review" | "ready"
+    risk: Optional[str] = "medium"    # "high" | "medium" | "low"
 
 
 class ActionResponse(Model):
@@ -210,6 +219,16 @@ class PendingAction(Model):
     priority: str
     created_at: str
     requested_by: Optional[str] = None
+    # Rich card metadata for the dashboard UI
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    team: Optional[str] = None
+    owner: Optional[str] = None
+    owner_name: Optional[str] = None
+    ticket_status: Optional[str] = None  # "blocked" | "in_review" | "ready"
+    risk: Optional[str] = "medium"
+    stub: Optional[bool] = True
+    escalation_json: Optional[str] = None  # JSON: {required, reason, recommended}
 
 
 class PendingActionsResponse(Model):

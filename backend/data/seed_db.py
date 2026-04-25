@@ -31,7 +31,7 @@ _LABEL_ROLE_MAP = {"design": "Design", "gtm": "GTM", "marketing": "GTM",
 
 _MONGODB_URI = os.getenv("MONGODB_URI", "")
 _GEMINI_KEY  = os.getenv("GEMINI_API_KEY", "")
-_EMBED_MODEL = "text-embedding-004"
+_EMBED_MODEL = "models/gemini-embedding-001"
 _EMBED_DIM   = 768
 _SEED_DIR    = Path(__file__).parent / "seed"
 
@@ -46,8 +46,13 @@ def _embed_sync(text: str) -> list[float] | None:
         return None
     try:
         from google import genai
+        from google.genai import types
         client = genai.Client(api_key=_GEMINI_KEY)
-        result = client.models.embed_content(model=_EMBED_MODEL, contents=text)
+        result = client.models.embed_content(
+            model=_EMBED_MODEL,
+            contents=text,
+            config=types.EmbedContentConfig(output_dimensionality=_EMBED_DIM),
+        )
         return result.embeddings[0].values
     except Exception as exc:
         print(f"    [warn] Embedding failed: {exc}")
