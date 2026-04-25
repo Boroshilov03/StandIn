@@ -24,6 +24,7 @@ import os
 import sys
 import uuid
 from datetime import datetime, UTC
+from pathlib import Path
 
 from dotenv import load_dotenv
 from uagents import Agent, Context, Model
@@ -46,6 +47,17 @@ from models import (
     RejectRequest,
     RejectResponse,
 )
+
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from services.calendarService import createEvent
+    from services.slackService import postAsUser
+except Exception:
+    createEvent = None
+    postAsUser = None
 
 # ---------------------------------------------------------------------------
 # Agent
@@ -180,19 +192,42 @@ async def _action_send_email(action_id: str, payload: dict, priority: str) -> tu
 
 async def _action_send_slack(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
     """
-    STUB — mcp__claude_ai_Slack__slack_send_message
-    Connect: call slack_send_message(channel=..., text=...).
+    Live Slack send via chat.postMessage (top-level only; no threads).
 
-    payload: { channel: str, text: str, thread_ts?: str }
+    payload: { text: str, channel?: str, user_id?: str }
+    channel: optional slack_channels key (channelId, #name, or slackChannelId); defaults to #standin-updates.
+    user_id: users._id (e.g. user_alice). Caller may merge ActionRequest.owner into payload before invoke.
     """
-    channel = payload.get("channel", "#general")
-    text    = payload.get("text", "")[:80]
-    _LOGGER.info(
-        f"[STUB] send_slack | channel={channel} | text='{text}...' | "
-        f"priority={priority} — Slack MCP not connected"
-    )
-    result = f"[stub] Slack message to {channel} queued."
-    return True, result, True
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return False, "send_slack requires non-empty payload.text", False
+
+    user_id = (payload.get("user_id") or "").strip()
+    if not user_id:
+        return False, "send_slack requires user_id (users._id, e.g. user_alice).", False
+
+    raw_ch = payload.get("channel")
+    channel_key = None
+    if isinstance(raw_ch, str):
+        channel_key = raw_ch.strip() or None
+    elif raw_ch is not None:
+        channel_key = str(raw_ch).strip() or None
+
+    if postAsUser is None:
+        return False, "Slack service unavailable (missing dependencies or import path).", True
+    if not _MONGODB_URI:
+        return False, "send_slack requires MONGODB_URI for channel and user lookup.", True
+
+    try:
+        response = postAsUser(user_id, text, channel_key)
+        ts = response.get("ts", "unknown")
+        resolved = response.get("channel", channel_key or "default")
+        result = f"Slack message posted as {user_id} to channel={resolved}. ts={ts}"
+        return True, result, False
+    except (ValueError, RuntimeError) as exc:
+        return False, str(exc), False
+    except Exception as exc:
+        return False, f"Slack send failed: {exc}", False
 
 
 async def _action_draft_slack(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
@@ -251,15 +286,30 @@ async def _action_schedule_meeting(action_id: str, payload: dict, priority: str)
 
     payload: { title: str, attendees: list[str], start_time: str, duration_minutes: int, description?: str }
     """
-    title     = payload.get("title", "Meeting")
-    attendees = payload.get("attendees", [])
-    start     = payload.get("start_time", "")
-    _LOGGER.info(
-        f"[STUB] schedule_meeting | title='{title}' | attendees={attendees} | "
-        f"start={start} — Google Calendar MCP not connected"
-    )
-    result = f"[stub] '{title}' with {attendees} at {start} would be scheduled."
-    return True, result, True
+    if createEvent is None:
+        result = "Calendar service unavailable (missing dependencies or import path)."
+        return False, result, True
+    try:
+        owner_user_id = payload.get("owner_user_id", "alice.chen")
+        event_details = {
+            "meetingId": payload.get("meeting_id"),
+            "summary": payload.get("title", "Meeting"),
+            "description": payload.get("description", ""),
+            "start": {
+                "dateTime": payload.get("start_time"),
+                "timeZone": payload.get("time_zone", "America/Los_Angeles"),
+            },
+            "end": {
+                "dateTime": payload.get("end_time"),
+                "timeZone": payload.get("time_zone", "America/Los_Angeles"),
+            },
+            "attendees": [{"email": email} for email in payload.get("attendees", [])],
+        }
+        created = createEvent(owner_user_id, event_details)
+        result = f"Calendar event created. eventId={created.get('id')}"
+        return True, result, False
+    except Exception as exc:
+        return False, f"Calendar scheduling failed: {exc}", False
 
 
 async def _action_create_action_item(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
@@ -455,13 +505,19 @@ async def _handle_action_inner(ctx: Context, sender: str, msg: ActionRequest):
         return
 
     # ── Immediate execution ────────────────────────────────────────────────
+    exec_payload = payload
+    if msg.action_type == "send_slack":
+        exec_payload = dict(payload)
+        if not (exec_payload.get("user_id") or "").strip() and (msg.owner or "").strip():
+            exec_payload["user_id"] = msg.owner.strip()
+
     try:
-        success, result, stub = await handler(action_id, payload, priority)
+        success, result, stub = await handler(action_id, exec_payload, priority)
     except Exception as exc:
         ctx.logger.error(f"Action '{msg.action_type}' raised unexpectedly: {exc}")
         success, result, stub = False, str(exc), True
 
-    _log_action(action_id, msg.action_type, payload, success, result, stub)
+    _log_action(action_id, msg.action_type, exec_payload, success, result, stub)
 
     response = ActionResponse(
         request_id=msg.request_id,
@@ -537,7 +593,7 @@ async def approve_action(ctx: Context, req: ApproveRequest) -> ApproveResponse:
             )
 
         action_type = doc["action_type"]
-        payload     = doc.get("payload", {})
+        payload     = dict(doc.get("payload") or {})
         priority    = doc.get("priority", "normal")
         handler     = _ACTIONS.get(action_type)
 
@@ -546,6 +602,10 @@ async def approve_action(ctx: Context, req: ApproveRequest) -> ApproveResponse:
                 action_id=req.action_id, action_type=action_type,
                 approved=False, error=f"No handler for '{action_type}'",
             )
+
+        if action_type == "send_slack":
+            if not (payload.get("user_id") or "").strip() and (doc.get("owner") or "").strip():
+                payload["user_id"] = doc["owner"].strip()
 
         success, result, _ = await handler(req.action_id, payload, priority)
         _mark_approval_done(req.action_id, approved=success, result=result)
