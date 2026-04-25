@@ -11,19 +11,20 @@ Pipeline per request:
   Phase 3 — Contradictions : rule engine (always) + Gemini validation (when available)
   Phase 4 — Passports      : Evidence Passport for every high-risk / contested claim
 
-Run: python agents/status_agent/agent.py
+Run: python backend/agents/status_agent/agent.py
 """
 
 import asyncio
 import glob
 import json
+import logging
 import os
 import sys
 import uuid
 from datetime import datetime, timedelta, UTC
 
 from dotenv import load_dotenv
-from uagents import Agent, Context
+from uagents import Agent, Context, Model
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -46,6 +47,8 @@ from models import (
 _SEED = os.getenv("STATUS_AGENT_SEED", "status_agent_standin_seed_v1")
 _PORT = int(os.getenv("STATUS_AGENT_PORT", "8007"))
 _GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_LOGGER = logging.getLogger("status_agent")
 
 agent = Agent(
     name="status_agent",
@@ -339,19 +342,19 @@ async def _tool_rag_query(query: str, role_filter: str | None, limit: int) -> li
 
 async def _tool_google_drive_search(query: str, limit: int) -> list[dict]:
     """STUB — mcp__claude_ai_Google_Drive"""
-    agent.logger.debug(f"[STUB] Drive search not connected — query='{query}'")
+    _LOGGER.debug(f"[STUB] Drive search not connected — query='{query}'")
     return []
 
 
 async def _tool_notion_search(query: str, limit: int) -> list[dict]:
     """STUB — mcp__claude_ai_Notion__notion-search"""
-    agent.logger.debug(f"[STUB] Notion search not connected — query='{query}'")
+    _LOGGER.debug(f"[STUB] Notion search not connected — query='{query}'")
     return []
 
 
 async def _tool_web_search(query: str, limit: int) -> list[dict]:
     """STUB — WebSearch"""
-    agent.logger.debug(f"[STUB] Web search not connected — query='{query}'")
+    _LOGGER.debug(f"[STUB] Web search not connected — query='{query}'")
     return []
 
 
@@ -605,7 +608,7 @@ async def _synthesize_role(role: str, raw: dict) -> dict | None:
             ),
         )
         resp = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=_GEMINI_MODEL,
             contents=prompt,
             config=gt.GenerateContentConfig(
                 system_instruction=_SYSTEM_PROMPT,
@@ -614,7 +617,7 @@ async def _synthesize_role(role: str, raw: dict) -> dict | None:
         )
         return _validate_synthesis(json.loads(resp.text))
     except Exception as exc:
-        agent.logger.warning(f"Gemini synthesis failed for {role}: {exc}")
+        _LOGGER.warning(f"Gemini synthesis failed for {role}: {exc}")
         return None
 
 
@@ -730,7 +733,7 @@ async def _detect_contradictions(responses: list[MeetingResponse]) -> dict:
         ]
         client = genai.Client(api_key=_GEMINI_KEY)
         resp = await client.aio.models.generate_content(
-            model="gemini-2.5-flash",
+            model=_GEMINI_MODEL,
             contents=_CONTRADICTION_TMPL.format(
                 reports=json.dumps(reports_payload, default=str)
             ),
@@ -757,7 +760,7 @@ async def _detect_contradictions(responses: list[MeetingResponse]) -> dict:
             "recommended_action":  gemini.get("recommended_action") or rules["recommended_action"],
         }
     except Exception as exc:
-        agent.logger.warning(f"Gemini contradiction detection failed: {exc}")
+        _LOGGER.warning(f"Gemini contradiction detection failed: {exc}")
         return {**rules, "stale_claims": [], "missing_owners": []}
 
 
@@ -808,7 +811,7 @@ def _build_passports(
 # Startup
 # ---------------------------------------------------------------------------
 
-@agent.on_startup()
+@agent.on_event("startup")
 async def on_startup(ctx: Context):
     global _RAG_DOCS
     seed_dir = os.path.normpath(
@@ -1092,3 +1095,4 @@ async def health(ctx: Context) -> _HealthResponse:
 
 if __name__ == "__main__":
     agent.run()
+

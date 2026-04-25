@@ -16,9 +16,10 @@ calls the REST endpoints to approve or reject:
   POST /approvals/approve  — approve and execute (body: ApproveRequest)
   POST /approvals/reject   — reject without executing (body: RejectRequest)
 
-Run: python agents/perform_action/agent.py
+Run: python backend/agents/perform_action/agent.py
 """
 import json
+import logging
 import os
 import sys
 import uuid
@@ -52,6 +53,7 @@ from models import (
 _SEED = os.getenv("PERFORM_ACTION_SEED", "perform_action_standin_seed_v1")
 _PORT = int(os.getenv("PERFORM_ACTION_PORT", "8008"))
 _MONGODB_URI = os.getenv("MONGODB_URI", "")
+_LOGGER = logging.getLogger("perform_action")
 
 agent = Agent(
     name="perform_action",
@@ -168,7 +170,7 @@ async def _action_send_email(action_id: str, payload: dict, priority: str) -> tu
     """
     to      = payload.get("to", [])
     subject = payload.get("subject", "(no subject)")
-    agent.logger.info(
+    _LOGGER.info(
         f"[STUB] send_email | to={to} | subject='{subject}' | "
         f"priority={priority} — Gmail MCP not connected"
     )
@@ -185,7 +187,7 @@ async def _action_send_slack(action_id: str, payload: dict, priority: str) -> tu
     """
     channel = payload.get("channel", "#general")
     text    = payload.get("text", "")[:80]
-    agent.logger.info(
+    _LOGGER.info(
         f"[STUB] send_slack | channel={channel} | text='{text}...' | "
         f"priority={priority} — Slack MCP not connected"
     )
@@ -202,7 +204,7 @@ async def _action_draft_slack(action_id: str, payload: dict, priority: str) -> t
     payload: { channel: str, text: str }
     """
     channel = payload.get("channel", "#general")
-    agent.logger.info(f"[STUB] draft_slack | channel={channel} — Slack MCP not connected")
+    _LOGGER.info(f"[STUB] draft_slack | channel={channel} — Slack MCP not connected")
     result = f"[stub] Slack draft for {channel} created (pending approval)."
     return True, result, True
 
@@ -216,7 +218,7 @@ async def _action_create_jira(action_id: str, payload: dict, priority: str) -> t
     """
     summary = payload.get("summary", "(no summary)")
     project = payload.get("project", "NOVA")
-    agent.logger.info(
+    _LOGGER.info(
         f"[STUB] create_jira | project={project} | summary='{summary}' | "
         f"priority={priority} — Atlassian MCP not connected"
     )
@@ -234,7 +236,7 @@ async def _action_update_jira_status(action_id: str, payload: dict, priority: st
     """
     ticket_id  = payload.get("ticket_id", "")
     new_status = payload.get("new_status", "")
-    agent.logger.info(
+    _LOGGER.info(
         f"[STUB] update_jira_status | ticket={ticket_id} | status={new_status} — "
         f"Atlassian MCP not connected"
     )
@@ -252,7 +254,7 @@ async def _action_schedule_meeting(action_id: str, payload: dict, priority: str)
     title     = payload.get("title", "Meeting")
     attendees = payload.get("attendees", [])
     start     = payload.get("start_time", "")
-    agent.logger.info(
+    _LOGGER.info(
         f"[STUB] schedule_meeting | title='{title}' | attendees={attendees} | "
         f"start={start} — Google Calendar MCP not connected"
     )
@@ -269,7 +271,7 @@ async def _action_create_action_item(action_id: str, payload: dict, priority: st
     """
     if not _MONGODB_URI:
         desc = payload.get("description", "")
-        agent.logger.info(f"[STUB] create_action_item | '{desc}' — MONGODB_URI not set")
+        _LOGGER.info(f"[STUB] create_action_item | '{desc}' — MONGODB_URI not set")
         return True, f"[stub] Action item '{desc}' would be saved to MongoDB.", True
 
     try:
@@ -285,10 +287,10 @@ async def _action_create_action_item(action_id: str, payload: dict, priority: st
             "status":              "open",
         }
         db["action_items"].insert_one(doc)
-        agent.logger.info(f"Action item saved | id={action_id}")
+        _LOGGER.info(f"Action item saved | id={action_id}")
         return True, f"Action item saved. id={action_id}", False  # not a stub
     except Exception as exc:
-        agent.logger.warning(f"MongoDB write failed: {exc}")
+        _LOGGER.warning(f"MongoDB write failed: {exc}")
         return False, f"MongoDB write failed: {exc}", True
 
 
@@ -302,7 +304,7 @@ async def _action_post_brief(action_id: str, payload: dict, priority: str) -> tu
     """
     if not _MONGODB_URI:
         brief_id = payload.get("brief_id", "unknown")
-        agent.logger.info(f"[STUB] post_brief | brief_id={brief_id} — MONGODB_URI not set")
+        _LOGGER.info(f"[STUB] post_brief | brief_id={brief_id} — MONGODB_URI not set")
         return True, f"[stub] Brief '{brief_id}' would be saved to MongoDB.", True
 
     try:
@@ -315,10 +317,10 @@ async def _action_post_brief(action_id: str, payload: dict, priority: str) -> tu
             "created_at":          datetime.now(UTC).isoformat(),
         }
         db["evidence_passports"].insert_one(doc)
-        agent.logger.info(f"Brief saved | brief_id={doc['brief_id']}")
+        _LOGGER.info(f"Brief saved | brief_id={doc['brief_id']}")
         return True, f"Brief saved. brief_id={doc['brief_id']}", False
     except Exception as exc:
-        agent.logger.warning(f"MongoDB write failed: {exc}")
+        _LOGGER.warning(f"MongoDB write failed: {exc}")
         return False, f"MongoDB write failed: {exc}", True
 
 
@@ -339,7 +341,7 @@ _ACTIONS: dict[str, object] = {
 # Startup
 # ---------------------------------------------------------------------------
 
-@agent.on_startup()
+@agent.on_event("startup")
 async def on_startup(ctx: Context):
     mongo_ok = bool(_MONGODB_URI)
     live_actions    = ["create_action_item", "post_brief"] if mongo_ok else []
@@ -739,3 +741,4 @@ async def health(ctx: Context) -> _HealthResponse:
 
 if __name__ == "__main__":
     agent.run()
+

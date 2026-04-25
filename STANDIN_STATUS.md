@@ -26,7 +26,7 @@
 
 | Agent | Port | File | Handles |
 |---|---|---|---|
-| Orchestrator | 8000 | `backend/agents/orchestrator_agent.py` | Entry point — routes to sub-agents |
+| Orchestrator | 8000 | `backend/agents/orchestrator/agent.py` | Entry point — routes to sub-agents |
 | Status Agent | 8007 | `backend/agents/status_agent/agent.py` | Current status briefs + verification |
 | Perform Action | 8008 | `backend/agents/perform_action/agent.py` | Actions + approval gate + graph API |
 | Historical Agent | 8009 | `backend/agents/historical_agent/agent.py` | RAG — historical Q&A |
@@ -35,12 +35,8 @@
 ### How to run
 ```bash
 .venv\Scripts\activate
-python backend/agents/status_agent/agent.py        # port 8007
-python backend/agents/perform_action/agent.py      # port 8008
-python backend/agents/historical_agent/agent.py    # port 8009
-python backend/agents/watchdog_agent/agent.py      # port 8010
-# Tomiwa's orchestrator:
-python backend/agents/orchestrator_agent.py        # port 8000
+python backend/main.py
+python backend/test_orchestrator.py "Create a Jira ticket for the checkout API v2 blocker."
 ```
 
 ---
@@ -89,7 +85,7 @@ Requires `MONGODB_URI` and optionally `GEMINI_API_KEY` in `.env`.
 
 ## REST Endpoints (perform_action, port 8008)
 
-All endpoints available when `python agents/perform_action/agent.py` is running.
+All endpoints are exposed when the local topology is running via `python backend/main.py`.
 
 | Method | Path | Description | Auth needed? |
 |---|---|---|---|
@@ -121,7 +117,7 @@ Edge `type` values: `"meeting"` | `"slack_thread"` | `"jira"`
 
 ---
 
-## Key Models (`models.py`)
+## Key Models (`backend/models.py`)
 
 | Model | Direction | Purpose |
 |---|---|---|
@@ -168,8 +164,8 @@ Actions that **execute immediately**:
 
 | Feature | Current state | Replaced when |
 |---|---|---|
-| Slack data | `data/company_data.py` SLACK dict | `mcp__claude_ai_Slack__slack_search_public_and_private` connected |
-| Jira data | `data/company_data.py` JIRA dict | `mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql` connected |
+| Slack data | `backend/data/company_data.py` SLACK dict | `mcp__claude_ai_Slack__slack_search_public_and_private` connected |
+| Jira data | `backend/data/company_data.py` JIRA dict | `mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql` connected |
 | Google Drive | Returns empty list | `mcp__claude_ai_Google_Drive` connected |
 | Notion | Returns empty list | `mcp__claude_ai_Notion__notion-search` connected |
 | Web search | Returns empty list | `WebSearch` connected |
@@ -257,3 +253,4 @@ Steps per agent:
 | MCP tool connections | Medium | Swap stubs when tools are connected |
 | Dashboard UI | Medium | Other teammate — `GET /graph` endpoint ready |
 | Escalation Agent | Medium | Receives passport, decides action, calls perform_action |
+
