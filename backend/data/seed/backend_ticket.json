@@ -1,0 +1,13 @@
+{
+  "id": "doc_backend_ticket",
+  "filename": "backend_ticket.md",
+  "title": "NOVA-142: Update launch page integration for v2 checkout API",
+  "type": "jira_ticket",
+  "author": "derek.vasquez",
+  "role": "Engineering",
+  "timestamp": "2026-04-25T02:30:00Z",
+  "tags": ["launch-alpha", "blocker", "api-v2", "launch-page"],
+  "source_system": "jira",
+  "sensitive_flags": [],
+  "content": "# NOVA-142: Update launch page integration for v2 checkout API\n\n**Status:** BLOCKED\n**Priority:** Critical\n**Assignee:** Derek Vasquez\n**Sprint:** Launch Alpha Sprint 4\n**Story Points:** 3\n\n## Description\nCheckout endpoint changed from /v1/checkout to /v2/checkout last night. The launch page integration still calls the old endpoint. Without this fix, the checkout button on the launch page will return a 404 error in production.\n\n## Reason for Block\nCheckout endpoint changed from /v1/checkout to /v2/checkout last night.\n\n## Acceptance Criteria\n- [ ] Launch page integration updated to call /v2/checkout\n- [ ] Integration test passes on staging\n- [ ] QA smoke test completed and signed off by Kai Torres\n- [ ] No regression on existing checkout flow behavior\n\n## Comments\n**kai.torres** (2026-04-25 07:52): Confirmed failing on staging. Smoke test hits 404 at /v1/checkout. Not signing off until this merges.\n\n**alice.chen** (2026-04-25 09:02): This needs to be resolved before we can go-live Monday. Derek, what's ETA?\n\n**derek.vasquez** (2026-04-25 09:05): Fix in progress. Should have a PR by EOD Friday. QA can rerun Saturday morning if the merge completes tonight."
+}

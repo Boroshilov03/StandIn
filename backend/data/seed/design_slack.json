@@ -1,0 +1,14 @@
+{
+  "id": "doc_design_slack",
+  "filename": "design_slack.md",
+  "title": "Slack Message — Design: Launch Page Ready",
+  "type": "slack_message",
+  "author": "priya.mehta",
+  "role": "Design",
+  "timestamp": "2026-04-25T08:47:00Z",
+  "tags": ["launch-alpha", "design", "launch-page", "slack"],
+  "source_system": "slack",
+  "sensitive_flags": [],
+  "channel": "#launch-alpha",
+  "content": "**#launch-alpha** | Priya Mehta | 8:47 AM\n\nLaunch page is final and ready to ship. All assets approved by Alice. Handing off to Engineering for final integration check. Figma link is in the handoff doc — everything you need is there. Design is done on our end. :white_check_mark:\n\n> [Reactions: :white_check_mark: x3]\n\n---\n\nThis is the Design team's confirmation that the launch page is complete. All visual assets, copy, and interactive states are finalized and delivered. Design has no outstanding work before Monday's launch."
+}

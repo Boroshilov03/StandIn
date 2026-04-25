@@ -1,0 +1,13 @@
+{
+  "id": "doc_launch_readiness",
+  "filename": "launch_readiness.md",
+  "title": "Launch Alpha Readiness Checklist",
+  "type": "checklist",
+  "author": "alice.chen",
+  "role": "Product",
+  "timestamp": "2026-04-25T09:00:00Z",
+  "tags": ["launch-alpha", "checklist", "readiness"],
+  "source_system": "notion",
+  "sensitive_flags": [],
+  "content": "# Launch Alpha Readiness Checklist\n\n**Owner:** Alice Chen\n**Last Updated:** 2026-04-25 09:00 AM PT\n**Target Launch:** Monday 2026-04-28 09:00 AM PT\n\n## Engineering\n- [x] Gemini summarization integrated (NOVA-139)\n- [x] Checkout AI core feature complete\n- [ ] NOVA-142: Launch page integration for v2 API — **BLOCKED**\n- [ ] NOVA-143: QA smoke test sign-off — **BLOCKED (depends on NOVA-142)**\n- [ ] Deployment runbook reviewed\n- [ ] Rollback plan confirmed\n\n## Design\n- [x] Launch page assets delivered (NOVA-140)\n- [x] Mobile layout reviewed\n- [x] Design sign-off complete\n- [ ] Mobile layout bug fixes confirmed by QA\n\n## GTM\n- [x] Launch email drafted\n- [ ] Pricing confirmed by legal\n- [ ] Launch email scheduled\n- [ ] Sales one-pager finalized\n\n## Product\n- [x] Beta feedback reviewed\n- [x] Success metrics defined\n- [ ] Legal sign-off on brief\n- [ ] Go/no-go decision confirmed by Alice\n\n## Overall Status\n**NOT READY** — 2 critical engineering blockers unresolved as of Friday morning.\n\n## Escalation Required\nEngineering and Design need to align on launch page integration status before go/no-go can be confirmed."
+}

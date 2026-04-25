@@ -1,0 +1,13 @@
+{
+  "id": "doc_beta_feedback",
+  "filename": "beta_feedback.md",
+  "title": "Customer Beta Feedback — Week 3",
+  "type": "customer_feedback",
+  "author": "alice.chen",
+  "role": "Product",
+  "timestamp": "2026-04-24T16:00:00Z",
+  "tags": ["launch-alpha", "beta", "feedback", "customers"],
+  "source_system": "google_drive",
+  "sensitive_flags": ["pii"],
+  "content": "# Customer Beta Feedback — Week 3\n\n**Compiled by:** Alice Chen, Product Manager\n**Period:** April 18–24, 2026\n**Respondents:** 12 beta storefronts\n\n## Summary\nOverall satisfaction: 4.1/5. Key themes: speed, suggestion quality, mobile experience needs work.\n\n## Top Feedback Themes\n\n### Positive\n- \"The AI suggestions are genuinely helpful — customers are completing checkout faster.\"\n- \"Integration was straightforward. Docs are clear.\"\n- \"Response time is impressive for a beta.\"\n\n### Concerns\n- Mobile checkout flow has layout issues on small screens (5 reports)\n- Upsell suggestions occasionally irrelevant to cart contents (3 reports)\n- One storefront reported intermittent 502 errors on high-traffic bursts\n\n## Notable Responses\n\n**BetaCorp (john.smith@betacorp.com):**\n\"We've been running the AI assistant on our holiday sale pages and the uplift is real. Main ask: better handling of gift card products — the AI doesn't understand them yet. Overall very positive experience. We'll be upgrading to the paid plan at launch.\"\n\n**Storefront: Maplewood Goods:**\n\"Mobile experience needs work but desktop is solid. Planning to go live with Launch Alpha.\"\n\n## Action Items\n- [ ] Mobile layout fixes — Design (target: before launch)\n- [ ] Improve gift card product intent detection — Engineering (post-launch)\n- [ ] Investigate 502 errors — Engineering (pre-launch if possible)\n\n## NPS Score This Week\n47 (target: >40 at launch ✓)"
+}
