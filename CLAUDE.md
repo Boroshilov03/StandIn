@@ -31,7 +31,7 @@ Local edge device acting as a mandatory privacy gateway. Raw data from Slack/Gma
 | Agent framework | Fetch.ai uAgents 0.22.5 | Agent registration, Chat Protocol, message passing |
 | Agent marketplace | Agentverse (Fetch.ai) | Discovery, hosted mailboxes |
 | Chat interface | ASI:One | User-facing entry point (no custom frontend) |
-| LLM — cloud | Google Gemini `gemini-2.0-flash` | Intent extraction, synthesis, conflict detection, structured output |
+| LLM — cloud | Google Gemini `gemini-2.5-flash` | Intent extraction, synthesis, conflict detection, structured output |
 | LLM — local privacy filter | Model on ASUS GX10 | PII classification + redaction (stretch) |
 | Embeddings | Gemini `text-embedding-004` (768-dim) | RAG vector search |
 | Database | MongoDB Atlas | All persistent state |
@@ -78,11 +78,11 @@ WATCHDOG_ADDRESS=agent1q...
 
 ## Agent Architecture
 
-**Only the Orchestrator is registered in the ASI:One marketplace.** Sub-agent addresses are private and go in `.env`. All agents set `mailbox=True` and `publish_agent_details=True` — they self-register on Agentverse when started.
+The Orchestrator is the ASI:One-facing entrypoint. For local testing, run the full topology through `backend/main.py`; for hosted setups, publish the orchestrator and keep downstream agent wiring explicit in configuration.
 
 | Agent | Port | File | Status | Owner |
 |---|---|---|---|---|
-| Orchestrator | 8000 | `backend/agents/orchestrator_agent.py` | In progress | Tomiwa |
+| Orchestrator | 8000 | `backend/agents/orchestrator/agent.py` | Implemented locally | Tomiwa |
 | Status Agent | 8007 | `backend/agents/status_agent/agent.py` | Done | Mirlan |
 | Perform Action | 8008 | `backend/agents/perform_action/agent.py` | Done | Mirlan |
 | Historical Agent | 8009 | `backend/agents/historical_agent/agent.py` | Done | Mirlan |
@@ -241,12 +241,11 @@ Five sensitive items in seed docs for redaction testing: fake API key, CVE refer
 # Seed MongoDB (once — run from project root)
 python backend/data/seed_db.py
 
-# Start agents — separate terminals (run from project root)
-python backend/agents/status_agent/agent.py        # port 8007
-python backend/agents/perform_action/agent.py      # port 8008
-python backend/agents/historical_agent/agent.py    # port 8009
-python backend/agents/watchdog_agent/agent.py      # port 8010
-python backend/agents/orchestrator_agent.py        # port 8000 (Tomiwa)
+# Start the local topology (run from project root)
+python backend/main.py
+
+# One-shot orchestrator routing test
+python backend/test_orchestrator.py "Give me a briefing on Launch Alpha readiness."
 ```
 
 Exploration scripts:
@@ -263,7 +262,8 @@ python backend/interval_task.py   # Minimal uagents hello-world reference
 standin/
 ├── backend/
 │   ├── agents/
-│   │   ├── orchestrator_agent.py       # Intent classification + routing (Tomiwa)
+???   ???   ????????? orchestrator/
+???   ???   ???   ????????? agent.py                # Intent classification + routing (Tomiwa)
 │   │   ├── status_agent/
 │   │   │   └── agent.py                # Gather + synthesise + contradict + passports (port 8007)
 │   │   ├── perform_action/
@@ -276,7 +276,7 @@ standin/
 │   │   ├── company_data.py             # Seeded NovaLoop company data (USERS, SLACK, JIRA, CALENDAR)
 │   │   ├── seed_db.py                  # MongoDB seeder + embedding generator
 │   │   └── seed/                       # 12 JSON seed documents
-│   ├── models.py                       # All uAgents message models (shared)
+???   ????????? models.py                       # All shared uAgents message models
 │   ├── asii_test.py                    # ASI.1 API smoke test
 │   └── interval_task.py                # uagents hello-world reference
 ├── frontend/                           # (empty — UI to be built)
@@ -338,3 +338,5 @@ standin/
 | Perform Action | |
 | Historical Agent | |
 | Watchdog Agent | |
+
+

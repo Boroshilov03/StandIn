@@ -419,8 +419,9 @@ def seed():
         emb_note = f"  ({has_emb} with embeddings)" if col == "documents" else ""
         print(f"    standin.{col}: {count} documents{emb_note}")
 
-    print("\nDone. Run 'python agents/historical_agent/agent.py' to start the Historical agent.\n")
+    print("\nDone. Run 'python backend/main.py' or 'python backend/agents/historical_agent/agent.py' to start the Historical agent.\n")
 
 
 if __name__ == "__main__":
     seed()
+

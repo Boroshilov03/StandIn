@@ -14,7 +14,7 @@ Change signals detected:
   - Escalation newly required
   - Overall confidence drop > 0.10
 
-Run: python agents/watchdog_agent/agent.py
+Run: python backend/agents/watchdog_agent/agent.py
 
 Required .env:
   STATUS_AGENT_ADDRESS=agent1q...    (copy from status_agent startup log)
@@ -276,7 +276,7 @@ async def handle_action_response(ctx: Context, sender: str, msg: ActionResponse)
 # Startup
 # ---------------------------------------------------------------------------
 
-@agent.on_startup()
+@agent.on_event("startup")
 async def on_startup(ctx: Context) -> None:
     ctx.logger.info(
         f"Watchdog Agent online | address={ctx.agent.address} | port={_PORT}"
@@ -295,3 +295,4 @@ async def on_startup(ctx: Context) -> None:
 
 if __name__ == "__main__":
     agent.run()
+

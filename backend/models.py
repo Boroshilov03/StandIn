@@ -8,6 +8,20 @@ from uagents import Model
 
 
 # ---------------------------------------------------------------------------
+# Chat Orchestrator <-> ASI:One
+# ---------------------------------------------------------------------------
+
+class IntentClassification(Model):
+    intent: str
+    teams: List[str] = []
+    topic: Optional[str] = None
+    time_window: Optional[str] = None
+    action_type: Optional[str] = None
+    action_payload_json: Optional[str] = None
+    confidence: float = 0.0
+
+
+# ---------------------------------------------------------------------------
 # Core: Delegate <-> Orchestrator
 # ---------------------------------------------------------------------------
 

@@ -14,7 +14,7 @@ To activate Tier 1:
   1. Run:  python data/seed_db.py   (seeds docs + embeddings into MongoDB)
   2. Create the vector index in Atlas UI (seed_db.py prints instructions).
 
-Run: python agents/historical_agent/agent.py
+Run: python backend/agents/historical_agent/agent.py
 """
 
 import glob
@@ -41,6 +41,7 @@ from models import RAGRequest, RAGResponse
 _SEED = os.getenv("HISTORICAL_AGENT_SEED", "historical_agent_standin_seed_v1")
 _PORT = int(os.getenv("HISTORICAL_AGENT_PORT", "8009"))
 _GEMINI_KEY   = os.getenv("GEMINI_API_KEY", "")
+_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _MONGODB_URI  = os.getenv("MONGODB_URI", "")
 _VECTOR_INDEX = os.getenv("VECTOR_INDEX_NAME", "standin_vector_index")
 _EMBED_MODEL  = "text-embedding-004"   # 768-dim, free tier, fast
@@ -219,7 +220,7 @@ async def _synthesize(
 
     client = genai.Client(api_key=_GEMINI_KEY)
     resp = await client.aio.models.generate_content(
-        model="gemini-2.0-flash",
+        model=_GEMINI_MODEL,
         contents=prompt,
         config=gt.GenerateContentConfig(system_instruction=_SYSTEM),
     )
@@ -313,7 +314,7 @@ def _build_seed_cache() -> list[dict]:
     return docs
 
 
-@agent.on_startup()
+@agent.on_event("startup")
 async def on_startup(ctx: Context):
     global _SEED_DOCS
     _SEED_DOCS = _build_seed_cache()
@@ -436,3 +437,4 @@ async def health(ctx: Context) -> _HealthResponse:
 
 if __name__ == "__main__":
     agent.run()
+
