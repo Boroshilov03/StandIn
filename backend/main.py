@@ -32,6 +32,7 @@ from agents.historical_agent.agent import agent as historical_agent
 from agents.orchestrator.agent import orchestrator
 from agents.perform_action.agent import agent as perform_action_agent
 from agents.status_agent.agent import agent as status_agent
+from agents.watchdog_agent.agent import agent as watchdog_agent
 
 BUREAU_PORT = int(__import__("os").getenv("BUREAU_PORT", "8000"))
 
@@ -45,6 +46,7 @@ def main():
     bureau.add(status_agent)
     bureau.add(historical_agent)
     bureau.add(perform_action_agent)
+    bureau.add(watchdog_agent)
 
     print("\n=== StandIn Topology ===")
     print(f"  Bureau Port:      {BUREAU_PORT}")
@@ -52,6 +54,7 @@ def main():
     print(f"  Status Agent:    {status_agent.address}")
     print(f"  Historical:      {historical_agent.address}")
     print(f"  Perform Action:  {perform_action_agent.address}")
+    print(f"  Watchdog:        {watchdog_agent.address}")
     print("========================\n")
 
     bureau.run()
