@@ -123,6 +123,7 @@ class ActionRequest(Model):
     request_id: str
     action_type: str    # "send_email" | "send_slack" | "create_jira"
                         # | "schedule_meeting" | "create_action_item"
+    # payload: JSON dict — send_slack uses { text, channel?, user_id? }; user_id may be omitted if owner is set
     payload: str        # JSON-serialised dict — caller must json.dumps()
     context: Optional[str] = None
     priority: Optional[str] = "normal"  # "normal" | "urgent"

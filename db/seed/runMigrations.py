@@ -18,6 +18,7 @@ MIGRATIONS = [
     "db.migrations.005_decisions",
     "db.migrations.006_agent_briefs",
     "db.migrations.007_slack_messages",
+    "db.migrations.008_action_log",
 ]
 
 
