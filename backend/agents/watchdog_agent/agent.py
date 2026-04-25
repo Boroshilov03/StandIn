@@ -27,7 +27,7 @@ import json
 import os
 import sys
 import uuid
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 
 from dotenv import load_dotenv
 from uagents import Agent, Context
@@ -180,6 +180,13 @@ async def poll_status(ctx: Context) -> None:
     if not _STATUS_AGENT_ADDRESS:
         ctx.logger.warning("STATUS_AGENT_ADDRESS not set — watchdog idle")
         return
+
+    # Drop checks that never got a response (status_agent down or restarted)
+    cutoff = datetime.now(UTC) - timedelta(seconds=_INTERVAL * 2)
+    stale_ids = [k for k, v in _pending_checks.items() if v < cutoff]
+    for k in stale_ids:
+        ctx.logger.warning(f"Watchdog check {k} never received a response — dropping")
+        del _pending_checks[k]
 
     req_id = str(uuid.uuid4())
     _pending_checks[req_id] = datetime.now(UTC)

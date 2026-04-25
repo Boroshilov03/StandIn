@@ -25,12 +25,13 @@ import uuid
 from datetime import datetime, UTC
 
 from dotenv import load_dotenv
-from uagents import Agent, Context
+from uagents import Agent, Context, Model
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
+from data.company_data import CALENDAR, JIRA, SLACK, USERS
 from models import (
     ActionRequest,
     ActionResponse,
@@ -340,6 +341,11 @@ async def on_startup(ctx: Context):
         f"Approval-gated: {gated_actions or 'none (no MongoDB)'} | "
         f"Stubs: {stub_actions}"
     )
+    if not mongo_ok:
+        ctx.logger.warning(
+            "MONGODB_URI not set — approval gate, action logging, and live actions "
+            "(create_action_item, post_brief) are DISABLED. All actions return stubs."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -348,11 +354,27 @@ async def on_startup(ctx: Context):
 
 @agent.on_message(ActionRequest)
 async def handle_action(ctx: Context, sender: str, msg: ActionRequest):
+    # NOTE: this agent receives typed uAgents messages, NOT Chat Protocol.
+    # Orchestrator must call: await ctx.send(PERFORM_ACTION_ADDRESS, ActionRequest(...))
     ctx.logger.info(
         f"ActionRequest | id={msg.request_id} | type={msg.action_type} | "
         f"priority={msg.priority}"
     )
+    try:
+        await _handle_action_inner(ctx, sender, msg)
+    except Exception as exc:
+        ctx.logger.error(f"handle_action crashed: {exc}", exc_info=True)
+        await ctx.send(sender, ActionResponse(
+            request_id=msg.request_id,
+            action_type=msg.action_type,
+            success=False,
+            action_id=str(uuid.uuid4()),
+            error=f"Internal error — action handler crashed. Check agent logs.",
+            stub=True,
+        ))
 
+
+async def _handle_action_inner(ctx: Context, sender: str, msg: ActionRequest):
     handler = _ACTIONS.get(msg.action_type)
     if handler is None:
         response = ActionResponse(
@@ -536,10 +558,6 @@ async def reject_action(ctx: Context, req: RejectRequest) -> RejectResponse:
 
 def _build_graph_from_hardcoded() -> tuple[list[GraphNode], list[GraphEdge]]:
     """Fallback when MongoDB is not configured — uses company_data directly."""
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-    from data.company_data import USERS, SLACK, JIRA, CALENDAR
-
     nodes = [
         GraphNode(
             id=uid,
@@ -663,6 +681,27 @@ async def get_graph(ctx: Context) -> GraphResponse:
         ctx.logger.warning(f"Graph MongoDB read failed, falling back: {exc}")
         nodes, edges = _build_graph_from_hardcoded()
         return GraphResponse(nodes=nodes, edges=edges, generated_at=now, source="hardcoded")
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+class _HealthResponse(Model):
+    status: str
+    agent: str
+    mongodb: str
+    timestamp: str
+
+
+@agent.on_rest_get("/health", _HealthResponse)
+async def health(ctx: Context) -> _HealthResponse:
+    return _HealthResponse(
+        status="ok",
+        agent="perform_action",
+        mongodb="configured" if _MONGODB_URI else "not configured",
+        timestamp=datetime.now(UTC).isoformat(),
+    )
 
 
 if __name__ == "__main__":

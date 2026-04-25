@@ -832,6 +832,11 @@ async def on_startup(ctx: Context):
         f"RAG corpus: {len(_RAG_DOCS)} seed docs | "
         f"Roles: {ALL_ROLES}"
     )
+    if not _MONGODB_URI:
+        ctx.logger.warning(
+            "MONGODB_URI not set — conversation memory, delta detection, "
+            "and session history are DISABLED. All responses will use seeded fallback data."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -840,11 +845,31 @@ async def on_startup(ctx: Context):
 
 @agent.on_message(FullBriefRequest)
 async def handle_full_brief(ctx: Context, sender: str, msg: FullBriefRequest):
+    # NOTE: this agent receives typed uAgents messages, NOT Chat Protocol.
+    # Orchestrator must call: await ctx.send(STATUS_AGENT_ADDRESS, FullBriefRequest(...))
     ctx.logger.info(
         f"FullBriefRequest | id={msg.request_id} | "
         f"user={msg.user_email} | topic='{msg.topic}'"
     )
+    try:
+        await _handle_full_brief_inner(ctx, sender, msg)
+    except Exception as exc:
+        ctx.logger.error(f"Pipeline crashed unexpectedly: {exc}", exc_info=True)
+        await ctx.send(sender, FullBriefResponse(
+            request_id=msg.request_id,
+            user_email=msg.user_email,
+            role_statuses=[], contradictions=[], stale_claims=[],
+            unsupported_claims=[], evidence_passports=[],
+            escalation_required=False,
+            escalation_reason="Internal error — pipeline crashed. Check agent logs.",
+            recommended_action="Retry the request.",
+            overall_confidence=0.0,
+            mode="error",
+            session_id=msg.session_id or str(uuid.uuid4()),
+        ))
 
+
+async def _handle_full_brief_inner(ctx: Context, sender: str, msg: FullBriefRequest):
     roles   = msg.roles or ALL_ROLES
     now     = datetime.now(UTC).isoformat()
     session_id = msg.session_id or str(uuid.uuid4())
@@ -996,46 +1021,73 @@ async def handle_full_brief(ctx: Context, sender: str, msg: FullBriefRequest):
 
 @agent.on_message(VerifyRequest)
 async def handle_verify(ctx: Context, sender: str, msg: VerifyRequest):
-    """
-    Standalone verifier endpoint.
-    Accepts pre-collected MeetingResponses (from any source) and returns
-    a VerifyResponse without re-running data gathering or synthesis.
-
-    Use case: orchestrator already has role reports and only needs
-    contradiction detection + Evidence Passports on demand.
-    """
     ctx.logger.info(
         f"VerifyRequest | id={msg.request_id} | "
         f"roles={[r.role for r in msg.responses]}"
     )
+    try:
+        verdict = await _detect_contradictions(msg.responses)
+        stale   = _check_stale(msg.responses)
 
-    verdict = await _detect_contradictions(msg.responses)
-    stale   = _check_stale(msg.responses)
+        passports = _build_passports(
+            msg.responses,
+            verdict["contradictions"],
+            verdict["escalation_required"],
+            verdict["recommended_action"],
+        )
 
-    passports = _build_passports(
-        msg.responses,
-        verdict["contradictions"],
-        verdict["escalation_required"],
-        verdict["recommended_action"],
+        response = VerifyResponse(
+            request_id=msg.request_id,
+            contradictions=verdict["contradictions"],
+            stale_claims=stale,
+            unsupported_claims=verdict.get("unsupported_claims", []),
+            missing_owners=verdict.get("missing_owners", []),
+            escalation_required=verdict["escalation_required"],
+            escalation_reason=verdict["escalation_reason"],
+            evidence_passports=passports,
+            recommended_action=verdict["recommended_action"],
+        )
+
+        ctx.logger.info(
+            f"VerifyResponse | contradictions={len(response.contradictions)} | "
+            f"passports={len(passports)} | escalation={response.escalation_required}"
+        )
+        await ctx.send(sender, response)
+    except Exception as exc:
+        ctx.logger.error(f"VerifyRequest handler crashed: {exc}", exc_info=True)
+        await ctx.send(sender, VerifyResponse(
+            request_id=msg.request_id,
+            contradictions=[], stale_claims=[], unsupported_claims=[],
+            missing_owners=[], escalation_required=False,
+            escalation_reason="Internal error — verifier crashed. Check agent logs.",
+            evidence_passports=[],
+            recommended_action="Retry the request.",
+        ))
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+class _HealthResponse(Model):
+    status: str
+    agent: str
+    gemini: str
+    mongodb: str
+    rag_docs: int
+    timestamp: str
+
+
+@agent.on_rest_get("/health", _HealthResponse)
+async def health(ctx: Context) -> _HealthResponse:
+    return _HealthResponse(
+        status="ok",
+        agent="status_agent",
+        gemini="configured" if _GEMINI_KEY else "not configured",
+        mongodb="configured" if _MONGODB_URI else "not configured",
+        rag_docs=len(_RAG_DOCS),
+        timestamp=datetime.now(UTC).isoformat(),
     )
-
-    response = VerifyResponse(
-        request_id=msg.request_id,
-        contradictions=verdict["contradictions"],
-        stale_claims=stale,
-        unsupported_claims=verdict.get("unsupported_claims", []),
-        missing_owners=verdict.get("missing_owners", []),
-        escalation_required=verdict["escalation_required"],
-        escalation_reason=verdict["escalation_reason"],
-        evidence_passports=passports,
-        recommended_action=verdict["recommended_action"],
-    )
-
-    ctx.logger.info(
-        f"VerifyResponse | contradictions={len(response.contradictions)} | "
-        f"passports={len(passports)} | escalation={response.escalation_required}"
-    )
-    await ctx.send(sender, response)
 
 
 if __name__ == "__main__":

@@ -121,20 +121,27 @@ class ActionResponse(Model):
     action_id: str
     result: Optional[str] = None
     error: Optional[str] = None
-    stub: bool = True   # flips to False once real MCP tools are connected
+    # stub=True means the action was NOT actually executed (MCP not connected yet).
+    # Orchestrator should surface this to the user so they know it's simulated.
+    stub: bool = True
 
 
 # ---------------------------------------------------------------------------
-# Research Agent <-> Orchestrator  (replaces 4 delegates + verifier in one hop)
+# Status Agent <-> Orchestrator  (replaces 4 delegates + verifier in one hop)
 # ---------------------------------------------------------------------------
 
+# session_id threading for conversation memory + delta detection:
+#   1. First request: omit session_id (or pass None) — status_agent generates one.
+#   2. Extract session_id from FullBriefResponse.
+#   3. Pass it back on every subsequent request for the same user.
+#   Without this, each request is stateless and delta_claims will always be empty.
 class FullBriefRequest(Model):
     request_id: str
     user_email: str
     topic: Optional[str] = None
     roles: Optional[List[str]] = None   # None = all four roles
     context: Optional[str] = None
-    session_id: Optional[str] = None   # set to resume a prior conversation
+    session_id: Optional[str] = None   # omit on first request; echo back on follow-ups
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +176,12 @@ class FullBriefResponse(Model):
     escalation_reason: str
     recommended_action: str
     overall_confidence: float
-    mode: Optional[str] = "live"            # "live" | "seeded" | "partial"
-    session_id: Optional[str] = None
+    # mode tells the orchestrator the data quality — surface this to the user:
+    #   "live"   = Gemini synthesised from real tool data
+    #   "seeded" = hardcoded fallback (Gemini not configured or all tools stubbed)
+    #   "error"  = pipeline crashed, response is empty
+    mode: Optional[str] = "live"
+    session_id: Optional[str] = None        # echo back in next FullBriefRequest
     delta_claims: Optional[List[str]] = None  # what changed since last brief
 
 
