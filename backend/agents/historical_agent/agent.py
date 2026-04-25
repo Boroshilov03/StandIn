@@ -43,7 +43,7 @@ _PORT = int(os.getenv("HISTORICAL_AGENT_PORT", "8009"))
 _GEMINI_KEY   = os.getenv("GEMINI_API_KEY", "")
 _MONGODB_URI  = os.getenv("MONGODB_URI", "")
 _VECTOR_INDEX = os.getenv("VECTOR_INDEX_NAME", "standin_vector_index")
-_EMBED_MODEL  = "text-embedding-004"   # 768-dim, free tier, fast
+_EMBED_MODEL  = "models/gemini-embedding-001"   # 768-dim
 
 agent = Agent(
     name="historical_agent",
@@ -77,12 +77,13 @@ def _get_db():
 
 
 async def _embed(text: str) -> list[float]:
-    """Embed a single text string using Gemini text-embedding-004."""
     from google import genai
+    from google.genai import types
     client = genai.Client(api_key=_GEMINI_KEY)
     result = await client.aio.models.embed_content(
         model=_EMBED_MODEL,
         contents=text,
+        config=types.EmbedContentConfig(output_dimensionality=768),
     )
     return result.embeddings[0].values
 
@@ -219,7 +220,7 @@ async def _synthesize(
 
     client = genai.Client(api_key=_GEMINI_KEY)
     resp = await client.aio.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         contents=prompt,
         config=gt.GenerateContentConfig(system_instruction=_SYSTEM),
     )

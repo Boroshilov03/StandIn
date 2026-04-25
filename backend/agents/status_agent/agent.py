@@ -605,7 +605,7 @@ async def _synthesize_role(role: str, raw: dict) -> dict | None:
             ),
         )
         resp = await client.aio.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=prompt,
             config=gt.GenerateContentConfig(
                 system_instruction=_SYSTEM_PROMPT,
@@ -730,7 +730,7 @@ async def _detect_contradictions(responses: list[MeetingResponse]) -> dict:
         ]
         client = genai.Client(api_key=_GEMINI_KEY)
         resp = await client.aio.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.5-flash",
             contents=_CONTRADICTION_TMPL.format(
                 reports=json.dumps(reports_payload, default=str)
             ),

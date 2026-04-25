@@ -85,6 +85,10 @@ _APPROVAL_REQUIRED = {"send_email", "send_slack", "schedule_meeting"}
 def _save_pending_approval(
     action_id: str, action_type: str, payload: dict,
     priority: str, requested_by: str = "orchestrator",
+    title: str = "", summary: str = "", team: str = "",
+    owner: str = "", owner_name: str = "",
+    ticket_status: str = "in_review", risk: str = "medium",
+    stub: bool = True, escalation: dict | None = None,
 ) -> None:
     """Persist an action to pending_approvals collection."""
     if not _MONGODB_URI:
@@ -92,13 +96,22 @@ def _save_pending_approval(
     try:
         db = _get_db()
         db["pending_approvals"].insert_one({
-            "action_id":    action_id,
-            "action_type":  action_type,
-            "payload":      payload,
-            "priority":     priority,
-            "requested_by": requested_by,
-            "status":       "pending",
-            "created_at":   datetime.now(UTC).isoformat(),
+            "action_id":      action_id,
+            "action_type":    action_type,
+            "payload":        payload,
+            "priority":       priority,
+            "requested_by":   requested_by,
+            "status":         "pending",
+            "created_at":     datetime.now(UTC).isoformat(),
+            "title":          title or action_type.replace("_", " ").title(),
+            "summary":        summary,
+            "team":           team,
+            "owner":          owner,
+            "owner_name":     owner_name,
+            "ticket_status":  ticket_status,
+            "risk":           risk,
+            "stub":           stub,
+            "escalation":     escalation or {},
         })
     except Exception:
         pass
@@ -410,7 +423,18 @@ async def _handle_action_inner(ctx: Context, sender: str, msg: ActionRequest):
 
     # ── Approval gate ──────────────────────────────────────────────────────
     if msg.action_type in _APPROVAL_REQUIRED and _MONGODB_URI:
-        _save_pending_approval(action_id, msg.action_type, payload, priority)
+        _save_pending_approval(
+            action_id, msg.action_type, payload, priority,
+            requested_by=sender,
+            title=msg.title or "",
+            summary=msg.summary or msg.context or "",
+            team=msg.team or "",
+            owner=msg.owner or "",
+            owner_name=msg.owner_name or "",
+            ticket_status=msg.ticket_status or "in_review",
+            risk=msg.risk or "medium",
+            stub=True,
+        )
         ctx.logger.info(
             f"Action queued for approval | type={msg.action_type} | id={action_id}"
         )
@@ -475,6 +499,15 @@ async def list_pending(ctx: Context) -> PendingActionsResponse:
                 priority=r.get("priority", "normal"),
                 created_at=r.get("created_at", ""),
                 requested_by=r.get("requested_by"),
+                title=r.get("title", r["action_type"].replace("_", " ").title()),
+                summary=r.get("summary", ""),
+                team=r.get("team", ""),
+                owner=r.get("owner", ""),
+                owner_name=r.get("owner_name", ""),
+                ticket_status=r.get("ticket_status", "in_review"),
+                risk=r.get("risk", "medium"),
+                stub=r.get("stub", True),
+                escalation_json=json.dumps(r.get("escalation", {})),
             )
             for r in raw
         ]
