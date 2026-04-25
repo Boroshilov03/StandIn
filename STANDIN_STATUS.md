@@ -26,21 +26,21 @@
 
 | Agent | Port | File | Handles |
 |---|---|---|---|
-| Orchestrator | 8000 | `agents/orchestrator_agent.py` | Entry point — routes to sub-agents |
-| Status Agent | 8007 | `agents/status_agent/agent.py` | Current status briefs + verification |
-| Perform Action | 8008 | `agents/perform_action/agent.py` | Actions + approval gate + graph API |
-| Historical Agent | 8009 | `agents/historical_agent/agent.py` | RAG — historical Q&A |
-| Watchdog Agent | 8010 | `agents/watchdog_agent/agent.py` | Proactive monitoring + alerts |
+| Orchestrator | 8000 | `backend/agents/orchestrator_agent.py` | Entry point — routes to sub-agents |
+| Status Agent | 8007 | `backend/agents/status_agent/agent.py` | Current status briefs + verification |
+| Perform Action | 8008 | `backend/agents/perform_action/agent.py` | Actions + approval gate + graph API |
+| Historical Agent | 8009 | `backend/agents/historical_agent/agent.py` | RAG — historical Q&A |
+| Watchdog Agent | 8010 | `backend/agents/watchdog_agent/agent.py` | Proactive monitoring + alerts |
 
 ### How to run
 ```bash
 .venv\Scripts\activate
-python agents/status_agent/agent.py        # port 8007
-python agents/perform_action/agent.py     # port 8008
-python agents/historical_agent/agent.py  # port 8009
-python agents/watchdog_agent/agent.py    # port 8010
+python backend/agents/status_agent/agent.py        # port 8007
+python backend/agents/perform_action/agent.py      # port 8008
+python backend/agents/historical_agent/agent.py    # port 8009
+python backend/agents/watchdog_agent/agent.py      # port 8010
 # Tomiwa's orchestrator:
-python agents/orchestrator_agent.py      # port 8000
+python backend/agents/orchestrator_agent.py        # port 8000
 ```
 
 ---
@@ -81,7 +81,7 @@ Watchdog (8010)  ──→  Status Agent (poll every 30 min)
 
 ### Seed the database
 ```bash
-python data/seed_db.py
+python backend/data/seed_db.py
 ```
 Requires `MONGODB_URI` and optionally `GEMINI_API_KEY` in `.env`.
 

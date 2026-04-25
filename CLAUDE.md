@@ -82,11 +82,11 @@ WATCHDOG_ADDRESS=agent1q...
 
 | Agent | Port | File | Status | Owner |
 |---|---|---|---|---|
-| Orchestrator | 8000 | `agents/orchestrator_agent.py` | In progress | Tomiwa |
-| Status Agent | 8007 | `agents/status_agent/agent.py` | Done | Mirlan |
-| Perform Action | 8008 | `agents/perform_action/agent.py` | Done | Mirlan |
-| Historical Agent | 8009 | `agents/historical_agent/agent.py` | Done | Mirlan |
-| Watchdog Agent | 8010 | `agents/watchdog_agent/agent.py` | Done | Mirlan |
+| Orchestrator | 8000 | `backend/agents/orchestrator_agent.py` | In progress | Tomiwa |
+| Status Agent | 8007 | `backend/agents/status_agent/agent.py` | Done | Mirlan |
+| Perform Action | 8008 | `backend/agents/perform_action/agent.py` | Done | Mirlan |
+| Historical Agent | 8009 | `backend/agents/historical_agent/agent.py` | Done | Mirlan |
+| Watchdog Agent | 8010 | `backend/agents/watchdog_agent/agent.py` | Done | Mirlan |
 
 ### Orchestrator — intent classification
 
@@ -192,9 +192,9 @@ Watchdog (8010)  ──→  Status Agent (poll every 30 min)
 
 Seed the database:
 ```bash
-python data/seed_db.py
+python backend/data/seed_db.py
 ```
-Requires `MONGODB_URI` in `.env`. Gemini embeddings generated when `GEMINI_API_KEY` set.
+Requires `MONGODB_URI` in `.env` (`.env` lives at project root). Gemini embeddings generated when `GEMINI_API_KEY` set.
 
 After seeding, create the Atlas Vector Search index manually in Atlas UI (seed_db.py prints exact JSON).
 
@@ -238,21 +238,21 @@ Five sensitive items in seed docs for redaction testing: fake API key, CVE refer
 ```bash
 .venv\Scripts\activate
 
-# Seed MongoDB (once)
-python data/seed_db.py
+# Seed MongoDB (once — run from project root)
+python backend/data/seed_db.py
 
-# Start agents — separate terminals
-python agents/status_agent/agent.py        # port 8007
-python agents/perform_action/agent.py      # port 8008
-python agents/historical_agent/agent.py    # port 8009
-python agents/watchdog_agent/agent.py      # port 8010
-python agents/orchestrator_agent.py        # port 8000 (Tomiwa)
+# Start agents — separate terminals (run from project root)
+python backend/agents/status_agent/agent.py        # port 8007
+python backend/agents/perform_action/agent.py      # port 8008
+python backend/agents/historical_agent/agent.py    # port 8009
+python backend/agents/watchdog_agent/agent.py      # port 8010
+python backend/agents/orchestrator_agent.py        # port 8000 (Tomiwa)
 ```
 
 Exploration scripts:
 ```bash
-python asii_test.py       # ASI.1 API smoke test
-python interval_task.py   # Minimal uagents hello-world reference
+python backend/asii_test.py       # ASI.1 API smoke test
+python backend/interval_task.py   # Minimal uagents hello-world reference
 ```
 
 ---
@@ -261,23 +261,27 @@ python interval_task.py   # Minimal uagents hello-world reference
 
 ```
 standin/
-├── agents/
-│   ├── orchestrator_agent.py       # Intent classification + routing (Tomiwa)
-│   ├── status_agent/
-│   │   └── agent.py                # Gather + synthesise + contradict + passports (port 8007)
-│   ├── perform_action/
-│   │   └── agent.py                # Actions + approval gate + graph API (port 8008)
-│   ├── historical_agent/
-│   │   └── agent.py                # RAG — historical Q&A (port 8009)
-│   └── watchdog_agent/
-│       └── agent.py                # Proactive monitoring + alerts (port 8010)
-├── data/
-│   ├── company_data.py             # Seeded NovaLoop company data (USERS, SLACK, JIRA, CALENDAR)
-│   ├── seed_db.py                  # MongoDB seeder + embedding generator
-│   └── seed/                       # 12 JSON seed documents
-├── models.py                       # All uAgents message models (shared)
-├── asii_test.py                    # ASI.1 API smoke test
-└── interval_task.py                # uagents hello-world reference
+├── backend/
+│   ├── agents/
+│   │   ├── orchestrator_agent.py       # Intent classification + routing (Tomiwa)
+│   │   ├── status_agent/
+│   │   │   └── agent.py                # Gather + synthesise + contradict + passports (port 8007)
+│   │   ├── perform_action/
+│   │   │   └── agent.py                # Actions + approval gate + graph API (port 8008)
+│   │   ├── historical_agent/
+│   │   │   └── agent.py                # RAG — historical Q&A (port 8009)
+│   │   └── watchdog_agent/
+│   │       └── agent.py                # Proactive monitoring + alerts (port 8010)
+│   ├── data/
+│   │   ├── company_data.py             # Seeded NovaLoop company data (USERS, SLACK, JIRA, CALENDAR)
+│   │   ├── seed_db.py                  # MongoDB seeder + embedding generator
+│   │   └── seed/                       # 12 JSON seed documents
+│   ├── models.py                       # All uAgents message models (shared)
+│   ├── asii_test.py                    # ASI.1 API smoke test
+│   └── interval_task.py                # uagents hello-world reference
+├── frontend/                           # (empty — UI to be built)
+├── .env                                # API keys — stays at project root
+└── CLAUDE.md
 ```
 
 ---
