@@ -54,10 +54,28 @@ _GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
 _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _LOGGER = logging.getLogger("standin_orchestrator")
 
+
+def _normalize_submit_endpoint(raw_endpoint: str | None, port: int) -> str | None:
+    if not raw_endpoint:
+        return None
+    endpoint = raw_endpoint.rstrip("/")
+    if endpoint.endswith("/submit"):
+        return endpoint
+    return f"{endpoint}/submit"
+
+
+_ENDPOINT = _normalize_submit_endpoint(
+    os.getenv("ORCHESTRATOR_ENDPOINT") or os.getenv("PUBLIC_BASE_URL"),
+    _PORT,
+)
+_AGENTVERSE = (os.getenv("AGENTVERSE_URL") or "").rstrip("/") or None
+
 orchestrator = Agent(
     name="standin_orchestrator",
     seed=_SEED,
     port=_PORT,
+    endpoint=[_ENDPOINT] if _ENDPOINT else None,
+    agentverse=_AGENTVERSE,
     mailbox=True,
     publish_agent_details=True,
 )
@@ -476,4 +494,8 @@ orchestrator.include(chat_protocol, publish_manifest=True)
 
 
 if __name__ == "__main__":
+    if _ENDPOINT:
+        print(f"Orchestrator endpoint: {_ENDPOINT}")
+    if _AGENTVERSE:
+        print(f"Agentverse URL: {_AGENTVERSE}")
     orchestrator.run()

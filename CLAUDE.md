@@ -329,14 +329,14 @@ standin/
 
 ## Registered Agent Addresses
 
-*(Fill in after starting each agent — address is printed in startup log)*
+*(Derived from seeds — stable as long as seeds in `.env` don't change)*
 
 | Agent | Agentverse Address |
 |---|---|
-| Orchestrator | |
-| Status Agent | |
-| Perform Action | |
-| Historical Agent | |
-| Watchdog Agent | |
+| Orchestrator | agent1qg806566n3lkkceend90ung744z7vst3v3n8nx9zvjve6cc74cstq9mlkth |
+| Status Agent | agent1q2l8xf3dvwvmarl2dpxwtv5ym7pvge53szhstykukmrwuhm93z6k68tphgh |
+| Perform Action | agent1qf83fffdv22j2etuqarww9nwqcenq5zavvekh7k2utflqaxx08j4x38e69v |
+| Historical Agent | agent1qf60yzmr9reyjnduq8qneum5nf03zzaw60cl6yny9l7la676unf7jdfdtrv |
+| Watchdog Agent | agent1q0pt4zqv2z2fhe7e25w3pfdkjrh6fqzmu4lplkw0tp3uvkhlqmmful2h754 |
 
 

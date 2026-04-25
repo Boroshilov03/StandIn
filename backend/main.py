@@ -1,6 +1,7 @@
 """Run the StandIn agent topology with an ASI:One-facing orchestrator."""
 
 import asyncio
+import os
 
 from uagents import Agent, Bureau
 from uagents_core.types import AgentInfo
@@ -33,25 +34,55 @@ from agents.orchestrator.agent import orchestrator
 from agents.perform_action.agent import agent as perform_action_agent
 from agents.status_agent.agent import agent as status_agent
 
-BUREAU_PORT = int(__import__("os").getenv("BUREAU_PORT", "8000"))
+BUREAU_PORT = int(os.getenv("BUREAU_PORT", "8000"))
+
+
+def _normalize_submit_endpoint(raw_endpoint: str | None, port: int) -> str:
+    if raw_endpoint:
+        endpoint = raw_endpoint.rstrip("/")
+        if endpoint.endswith("/submit"):
+            return endpoint
+        return f"{endpoint}/submit"
+    return f"http://localhost:{port}/submit"
+
+
+def _resolve_public_endpoint(port: int) -> str:
+    explicit = os.getenv("BUREAU_ENDPOINT")
+    public_base = os.getenv("PUBLIC_BASE_URL")
+    return _normalize_submit_endpoint(explicit or public_base, port)
+
+
+def _resolve_agentverse() -> str | None:
+    agentverse = os.getenv("AGENTVERSE_URL")
+    if not agentverse:
+        return None
+    return agentverse.rstrip("/")
 
 
 def main():
+    public_endpoint = _resolve_public_endpoint(BUREAU_PORT)
+    agentverse_url = _resolve_agentverse()
     bureau = Bureau(
         port=BUREAU_PORT,
-        endpoint=[f"http://localhost:{BUREAU_PORT}/submit"],
+        endpoint=[public_endpoint],
+        agentverse=agentverse_url,
     )
     bureau.add(orchestrator)
     bureau.add(status_agent)
     bureau.add(historical_agent)
     bureau.add(perform_action_agent)
+    bureau.add(watchdog_agent)
 
     print("\n=== StandIn Topology ===")
     print(f"  Bureau Port:      {BUREAU_PORT}")
+    print(f"  Public Submit:    {public_endpoint}")
     print(f"  Orchestrator:    {orchestrator.address}")
     print(f"  Status Agent:    {status_agent.address}")
     print(f"  Historical:      {historical_agent.address}")
     print(f"  Perform Action:  {perform_action_agent.address}")
+    print(f"  Watchdog:        {watchdog_agent.address}")
+    if agentverse_url:
+        print(f"  Agentverse URL:   {agentverse_url}")
     print("========================\n")
 
     bureau.run()
