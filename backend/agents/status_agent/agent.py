@@ -11,19 +11,20 @@ Pipeline per request:
   Phase 3 — Contradictions : rule engine (always) + Gemini validation (when available)
   Phase 4 — Passports      : Evidence Passport for every high-risk / contested claim
 
-Run: python agents/status_agent/agent.py
+Run: python backend/agents/status_agent/agent.py
 """
 
 import asyncio
 import glob
 import json
+import logging
 import os
 import sys
 import uuid
 from datetime import datetime, timedelta, UTC
 
 from dotenv import load_dotenv
-from uagents import Agent, Context
+from uagents import Agent, Context, Model
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -46,6 +47,8 @@ from models import (
 _SEED = os.getenv("STATUS_AGENT_SEED", "status_agent_standin_seed_v1")
 _PORT = int(os.getenv("STATUS_AGENT_PORT", "8007"))
 _GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_LOGGER = logging.getLogger("status_agent")
 
 agent = Agent(
     name="status_agent",
@@ -339,19 +342,19 @@ async def _tool_rag_query(query: str, role_filter: str | None, limit: int) -> li
 
 async def _tool_google_drive_search(query: str, limit: int) -> list[dict]:
     """STUB — mcp__claude_ai_Google_Drive"""
-    agent.logger.debug(f"[STUB] Drive search not connected — query='{query}'")
+    _LOGGER.debug(f"[STUB] Drive search not connected — query='{query}'")
     return []
 
 
 async def _tool_notion_search(query: str, limit: int) -> list[dict]:
     """STUB — mcp__claude_ai_Notion__notion-search"""
-    agent.logger.debug(f"[STUB] Notion search not connected — query='{query}'")
+    _LOGGER.debug(f"[STUB] Notion search not connected — query='{query}'")
     return []
 
 
 async def _tool_web_search(query: str, limit: int) -> list[dict]:
     """STUB — WebSearch"""
-    agent.logger.debug(f"[STUB] Web search not connected — query='{query}'")
+    _LOGGER.debug(f"[STUB] Web search not connected — query='{query}'")
     return []
 
 
@@ -605,7 +608,7 @@ async def _synthesize_role(role: str, raw: dict) -> dict | None:
             ),
         )
         resp = await client.aio.models.generate_content(
-            model="gemini-2.0-flash",
+            model=_GEMINI_MODEL,
             contents=prompt,
             config=gt.GenerateContentConfig(
                 system_instruction=_SYSTEM_PROMPT,
@@ -614,7 +617,7 @@ async def _synthesize_role(role: str, raw: dict) -> dict | None:
         )
         return _validate_synthesis(json.loads(resp.text))
     except Exception as exc:
-        agent.logger.warning(f"Gemini synthesis failed for {role}: {exc}")
+        _LOGGER.warning(f"Gemini synthesis failed for {role}: {exc}")
         return None
 
 
@@ -730,7 +733,7 @@ async def _detect_contradictions(responses: list[MeetingResponse]) -> dict:
         ]
         client = genai.Client(api_key=_GEMINI_KEY)
         resp = await client.aio.models.generate_content(
-            model="gemini-2.0-flash",
+            model=_GEMINI_MODEL,
             contents=_CONTRADICTION_TMPL.format(
                 reports=json.dumps(reports_payload, default=str)
             ),
@@ -757,7 +760,7 @@ async def _detect_contradictions(responses: list[MeetingResponse]) -> dict:
             "recommended_action":  gemini.get("recommended_action") or rules["recommended_action"],
         }
     except Exception as exc:
-        agent.logger.warning(f"Gemini contradiction detection failed: {exc}")
+        _LOGGER.warning(f"Gemini contradiction detection failed: {exc}")
         return {**rules, "stale_claims": [], "missing_owners": []}
 
 
@@ -808,7 +811,7 @@ def _build_passports(
 # Startup
 # ---------------------------------------------------------------------------
 
-@agent.on_startup()
+@agent.on_event("startup")
 async def on_startup(ctx: Context):
     global _RAG_DOCS
     seed_dir = os.path.normpath(
@@ -832,6 +835,11 @@ async def on_startup(ctx: Context):
         f"RAG corpus: {len(_RAG_DOCS)} seed docs | "
         f"Roles: {ALL_ROLES}"
     )
+    if not _MONGODB_URI:
+        ctx.logger.warning(
+            "MONGODB_URI not set — conversation memory, delta detection, "
+            "and session history are DISABLED. All responses will use seeded fallback data."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -840,11 +848,31 @@ async def on_startup(ctx: Context):
 
 @agent.on_message(FullBriefRequest)
 async def handle_full_brief(ctx: Context, sender: str, msg: FullBriefRequest):
+    # NOTE: this agent receives typed uAgents messages, NOT Chat Protocol.
+    # Orchestrator must call: await ctx.send(STATUS_AGENT_ADDRESS, FullBriefRequest(...))
     ctx.logger.info(
         f"FullBriefRequest | id={msg.request_id} | "
         f"user={msg.user_email} | topic='{msg.topic}'"
     )
+    try:
+        await _handle_full_brief_inner(ctx, sender, msg)
+    except Exception as exc:
+        ctx.logger.error(f"Pipeline crashed unexpectedly: {exc}", exc_info=True)
+        await ctx.send(sender, FullBriefResponse(
+            request_id=msg.request_id,
+            user_email=msg.user_email,
+            role_statuses=[], contradictions=[], stale_claims=[],
+            unsupported_claims=[], evidence_passports=[],
+            escalation_required=False,
+            escalation_reason="Internal error — pipeline crashed. Check agent logs.",
+            recommended_action="Retry the request.",
+            overall_confidence=0.0,
+            mode="error",
+            session_id=msg.session_id or str(uuid.uuid4()),
+        ))
 
+
+async def _handle_full_brief_inner(ctx: Context, sender: str, msg: FullBriefRequest):
     roles   = msg.roles or ALL_ROLES
     now     = datetime.now(UTC).isoformat()
     session_id = msg.session_id or str(uuid.uuid4())
@@ -996,47 +1024,75 @@ async def handle_full_brief(ctx: Context, sender: str, msg: FullBriefRequest):
 
 @agent.on_message(VerifyRequest)
 async def handle_verify(ctx: Context, sender: str, msg: VerifyRequest):
-    """
-    Standalone verifier endpoint.
-    Accepts pre-collected MeetingResponses (from any source) and returns
-    a VerifyResponse without re-running data gathering or synthesis.
-
-    Use case: orchestrator already has role reports and only needs
-    contradiction detection + Evidence Passports on demand.
-    """
     ctx.logger.info(
         f"VerifyRequest | id={msg.request_id} | "
         f"roles={[r.role for r in msg.responses]}"
     )
+    try:
+        verdict = await _detect_contradictions(msg.responses)
+        stale   = _check_stale(msg.responses)
 
-    verdict = await _detect_contradictions(msg.responses)
-    stale   = _check_stale(msg.responses)
+        passports = _build_passports(
+            msg.responses,
+            verdict["contradictions"],
+            verdict["escalation_required"],
+            verdict["recommended_action"],
+        )
 
-    passports = _build_passports(
-        msg.responses,
-        verdict["contradictions"],
-        verdict["escalation_required"],
-        verdict["recommended_action"],
+        response = VerifyResponse(
+            request_id=msg.request_id,
+            contradictions=verdict["contradictions"],
+            stale_claims=stale,
+            unsupported_claims=verdict.get("unsupported_claims", []),
+            missing_owners=verdict.get("missing_owners", []),
+            escalation_required=verdict["escalation_required"],
+            escalation_reason=verdict["escalation_reason"],
+            evidence_passports=passports,
+            recommended_action=verdict["recommended_action"],
+        )
+
+        ctx.logger.info(
+            f"VerifyResponse | contradictions={len(response.contradictions)} | "
+            f"passports={len(passports)} | escalation={response.escalation_required}"
+        )
+        await ctx.send(sender, response)
+    except Exception as exc:
+        ctx.logger.error(f"VerifyRequest handler crashed: {exc}", exc_info=True)
+        await ctx.send(sender, VerifyResponse(
+            request_id=msg.request_id,
+            contradictions=[], stale_claims=[], unsupported_claims=[],
+            missing_owners=[], escalation_required=False,
+            escalation_reason="Internal error — verifier crashed. Check agent logs.",
+            evidence_passports=[],
+            recommended_action="Retry the request.",
+        ))
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+class _HealthResponse(Model):
+    status: str
+    agent: str
+    gemini: str
+    mongodb: str
+    rag_docs: int
+    timestamp: str
+
+
+@agent.on_rest_get("/health", _HealthResponse)
+async def health(ctx: Context) -> _HealthResponse:
+    return _HealthResponse(
+        status="ok",
+        agent="status_agent",
+        gemini="configured" if _GEMINI_KEY else "not configured",
+        mongodb="configured" if _MONGODB_URI else "not configured",
+        rag_docs=len(_RAG_DOCS),
+        timestamp=datetime.now(UTC).isoformat(),
     )
-
-    response = VerifyResponse(
-        request_id=msg.request_id,
-        contradictions=verdict["contradictions"],
-        stale_claims=stale,
-        unsupported_claims=verdict.get("unsupported_claims", []),
-        missing_owners=verdict.get("missing_owners", []),
-        escalation_required=verdict["escalation_required"],
-        escalation_reason=verdict["escalation_reason"],
-        evidence_passports=passports,
-        recommended_action=verdict["recommended_action"],
-    )
-
-    ctx.logger.info(
-        f"VerifyResponse | contradictions={len(response.contradictions)} | "
-        f"passports={len(passports)} | escalation={response.escalation_required}"
-    )
-    await ctx.send(sender, response)
 
 
 if __name__ == "__main__":
     agent.run()
+

@@ -16,9 +16,10 @@ calls the REST endpoints to approve or reject:
   POST /approvals/approve  — approve and execute (body: ApproveRequest)
   POST /approvals/reject   — reject without executing (body: RejectRequest)
 
-Run: python agents/perform_action/agent.py
+Run: python backend/agents/perform_action/agent.py
 """
 import json
+import logging
 import os
 import sys
 import uuid
@@ -26,12 +27,13 @@ from datetime import datetime, UTC
 from pathlib import Path
 
 from dotenv import load_dotenv
-from uagents import Agent, Context
+from uagents import Agent, Context, Model
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
+from data.company_data import CALENDAR, JIRA, SLACK, USERS
 from models import (
     ActionRequest,
     ActionResponse,
@@ -63,6 +65,7 @@ except Exception:
 _SEED = os.getenv("PERFORM_ACTION_SEED", "perform_action_standin_seed_v1")
 _PORT = int(os.getenv("PERFORM_ACTION_PORT", "8008"))
 _MONGODB_URI = os.getenv("MONGODB_URI", "")
+_LOGGER = logging.getLogger("perform_action")
 
 agent = Agent(
     name="perform_action",
@@ -96,6 +99,10 @@ _APPROVAL_REQUIRED = {"send_email", "send_slack", "schedule_meeting"}
 def _save_pending_approval(
     action_id: str, action_type: str, payload: dict,
     priority: str, requested_by: str = "orchestrator",
+    title: str = "", summary: str = "", team: str = "",
+    owner: str = "", owner_name: str = "",
+    ticket_status: str = "in_review", risk: str = "medium",
+    stub: bool = True, escalation: dict | None = None,
 ) -> None:
     """Persist an action to pending_approvals collection."""
     if not _MONGODB_URI:
@@ -103,13 +110,22 @@ def _save_pending_approval(
     try:
         db = _get_db()
         db["pending_approvals"].insert_one({
-            "action_id":    action_id,
-            "action_type":  action_type,
-            "payload":      payload,
-            "priority":     priority,
-            "requested_by": requested_by,
-            "status":       "pending",
-            "created_at":   datetime.now(UTC).isoformat(),
+            "action_id":      action_id,
+            "action_type":    action_type,
+            "payload":        payload,
+            "priority":       priority,
+            "requested_by":   requested_by,
+            "status":         "pending",
+            "created_at":     datetime.now(UTC).isoformat(),
+            "title":          title or action_type.replace("_", " ").title(),
+            "summary":        summary,
+            "team":           team,
+            "owner":          owner,
+            "owner_name":     owner_name,
+            "ticket_status":  ticket_status,
+            "risk":           risk,
+            "stub":           stub,
+            "escalation":     escalation or {},
         })
     except Exception:
         pass
@@ -166,7 +182,7 @@ async def _action_send_email(action_id: str, payload: dict, priority: str) -> tu
     """
     to      = payload.get("to", [])
     subject = payload.get("subject", "(no subject)")
-    agent.logger.info(
+    _LOGGER.info(
         f"[STUB] send_email | to={to} | subject='{subject}' | "
         f"priority={priority} — Gmail MCP not connected"
     )
@@ -205,7 +221,7 @@ async def _action_draft_slack(action_id: str, payload: dict, priority: str) -> t
     payload: { channel: str, text: str }
     """
     channel = payload.get("channel", "#general")
-    agent.logger.info(f"[STUB] draft_slack | channel={channel} — Slack MCP not connected")
+    _LOGGER.info(f"[STUB] draft_slack | channel={channel} — Slack MCP not connected")
     result = f"[stub] Slack draft for {channel} created (pending approval)."
     return True, result, True
 
@@ -219,7 +235,7 @@ async def _action_create_jira(action_id: str, payload: dict, priority: str) -> t
     """
     summary = payload.get("summary", "(no summary)")
     project = payload.get("project", "NOVA")
-    agent.logger.info(
+    _LOGGER.info(
         f"[STUB] create_jira | project={project} | summary='{summary}' | "
         f"priority={priority} — Atlassian MCP not connected"
     )
@@ -237,7 +253,7 @@ async def _action_update_jira_status(action_id: str, payload: dict, priority: st
     """
     ticket_id  = payload.get("ticket_id", "")
     new_status = payload.get("new_status", "")
-    agent.logger.info(
+    _LOGGER.info(
         f"[STUB] update_jira_status | ticket={ticket_id} | status={new_status} — "
         f"Atlassian MCP not connected"
     )
@@ -287,7 +303,7 @@ async def _action_create_action_item(action_id: str, payload: dict, priority: st
     """
     if not _MONGODB_URI:
         desc = payload.get("description", "")
-        agent.logger.info(f"[STUB] create_action_item | '{desc}' — MONGODB_URI not set")
+        _LOGGER.info(f"[STUB] create_action_item | '{desc}' — MONGODB_URI not set")
         return True, f"[stub] Action item '{desc}' would be saved to MongoDB.", True
 
     try:
@@ -303,10 +319,10 @@ async def _action_create_action_item(action_id: str, payload: dict, priority: st
             "status":              "open",
         }
         db["action_items"].insert_one(doc)
-        agent.logger.info(f"Action item saved | id={action_id}")
+        _LOGGER.info(f"Action item saved | id={action_id}")
         return True, f"Action item saved. id={action_id}", False  # not a stub
     except Exception as exc:
-        agent.logger.warning(f"MongoDB write failed: {exc}")
+        _LOGGER.warning(f"MongoDB write failed: {exc}")
         return False, f"MongoDB write failed: {exc}", True
 
 
@@ -320,7 +336,7 @@ async def _action_post_brief(action_id: str, payload: dict, priority: str) -> tu
     """
     if not _MONGODB_URI:
         brief_id = payload.get("brief_id", "unknown")
-        agent.logger.info(f"[STUB] post_brief | brief_id={brief_id} — MONGODB_URI not set")
+        _LOGGER.info(f"[STUB] post_brief | brief_id={brief_id} — MONGODB_URI not set")
         return True, f"[stub] Brief '{brief_id}' would be saved to MongoDB.", True
 
     try:
@@ -333,10 +349,10 @@ async def _action_post_brief(action_id: str, payload: dict, priority: str) -> tu
             "created_at":          datetime.now(UTC).isoformat(),
         }
         db["evidence_passports"].insert_one(doc)
-        agent.logger.info(f"Brief saved | brief_id={doc['brief_id']}")
+        _LOGGER.info(f"Brief saved | brief_id={doc['brief_id']}")
         return True, f"Brief saved. brief_id={doc['brief_id']}", False
     except Exception as exc:
-        agent.logger.warning(f"MongoDB write failed: {exc}")
+        _LOGGER.warning(f"MongoDB write failed: {exc}")
         return False, f"MongoDB write failed: {exc}", True
 
 
@@ -357,7 +373,7 @@ _ACTIONS: dict[str, object] = {
 # Startup
 # ---------------------------------------------------------------------------
 
-@agent.on_startup()
+@agent.on_event("startup")
 async def on_startup(ctx: Context):
     mongo_ok = bool(_MONGODB_URI)
     live_actions    = ["create_action_item", "post_brief"] if mongo_ok else []
@@ -372,6 +388,11 @@ async def on_startup(ctx: Context):
         f"Approval-gated: {gated_actions or 'none (no MongoDB)'} | "
         f"Stubs: {stub_actions}"
     )
+    if not mongo_ok:
+        ctx.logger.warning(
+            "MONGODB_URI not set — approval gate, action logging, and live actions "
+            "(create_action_item, post_brief) are DISABLED. All actions return stubs."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -380,11 +401,27 @@ async def on_startup(ctx: Context):
 
 @agent.on_message(ActionRequest)
 async def handle_action(ctx: Context, sender: str, msg: ActionRequest):
+    # NOTE: this agent receives typed uAgents messages, NOT Chat Protocol.
+    # Orchestrator must call: await ctx.send(PERFORM_ACTION_ADDRESS, ActionRequest(...))
     ctx.logger.info(
         f"ActionRequest | id={msg.request_id} | type={msg.action_type} | "
         f"priority={msg.priority}"
     )
+    try:
+        await _handle_action_inner(ctx, sender, msg)
+    except Exception as exc:
+        ctx.logger.error(f"handle_action crashed: {exc}", exc_info=True)
+        await ctx.send(sender, ActionResponse(
+            request_id=msg.request_id,
+            action_type=msg.action_type,
+            success=False,
+            action_id=str(uuid.uuid4()),
+            error=f"Internal error — action handler crashed. Check agent logs.",
+            stub=True,
+        ))
 
+
+async def _handle_action_inner(ctx: Context, sender: str, msg: ActionRequest):
     handler = _ACTIONS.get(msg.action_type)
     if handler is None:
         response = ActionResponse(
@@ -420,7 +457,18 @@ async def handle_action(ctx: Context, sender: str, msg: ActionRequest):
 
     # ── Approval gate ──────────────────────────────────────────────────────
     if msg.action_type in _APPROVAL_REQUIRED and _MONGODB_URI:
-        _save_pending_approval(action_id, msg.action_type, payload, priority)
+        _save_pending_approval(
+            action_id, msg.action_type, payload, priority,
+            requested_by=sender,
+            title=msg.title or "",
+            summary=msg.summary or msg.context or "",
+            team=msg.team or "",
+            owner=msg.owner or "",
+            owner_name=msg.owner_name or "",
+            ticket_status=msg.ticket_status or "in_review",
+            risk=msg.risk or "medium",
+            stub=True,
+        )
         ctx.logger.info(
             f"Action queued for approval | type={msg.action_type} | id={action_id}"
         )
@@ -485,6 +533,15 @@ async def list_pending(ctx: Context) -> PendingActionsResponse:
                 priority=r.get("priority", "normal"),
                 created_at=r.get("created_at", ""),
                 requested_by=r.get("requested_by"),
+                title=r.get("title", r["action_type"].replace("_", " ").title()),
+                summary=r.get("summary", ""),
+                team=r.get("team", ""),
+                owner=r.get("owner", ""),
+                owner_name=r.get("owner_name", ""),
+                ticket_status=r.get("ticket_status", "in_review"),
+                risk=r.get("risk", "medium"),
+                stub=r.get("stub", True),
+                escalation_json=json.dumps(r.get("escalation", {})),
             )
             for r in raw
         ]
@@ -568,10 +625,6 @@ async def reject_action(ctx: Context, req: RejectRequest) -> RejectResponse:
 
 def _build_graph_from_hardcoded() -> tuple[list[GraphNode], list[GraphEdge]]:
     """Fallback when MongoDB is not configured — uses company_data directly."""
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-    from data.company_data import USERS, SLACK, JIRA, CALENDAR
-
     nodes = [
         GraphNode(
             id=uid,
@@ -697,5 +750,27 @@ async def get_graph(ctx: Context) -> GraphResponse:
         return GraphResponse(nodes=nodes, edges=edges, generated_at=now, source="hardcoded")
 
 
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+class _HealthResponse(Model):
+    status: str
+    agent: str
+    mongodb: str
+    timestamp: str
+
+
+@agent.on_rest_get("/health", _HealthResponse)
+async def health(ctx: Context) -> _HealthResponse:
+    return _HealthResponse(
+        status="ok",
+        agent="perform_action",
+        mongodb="configured" if _MONGODB_URI else "not configured",
+        timestamp=datetime.now(UTC).isoformat(),
+    )
+
+
 if __name__ == "__main__":
     agent.run()
+

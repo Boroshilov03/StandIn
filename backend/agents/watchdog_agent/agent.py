@@ -14,7 +14,7 @@ Change signals detected:
   - Escalation newly required
   - Overall confidence drop > 0.10
 
-Run: python agents/watchdog_agent/agent.py
+Run: python backend/agents/watchdog_agent/agent.py
 
 Required .env:
   STATUS_AGENT_ADDRESS=agent1q...    (copy from status_agent startup log)
@@ -27,7 +27,7 @@ import json
 import os
 import sys
 import uuid
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 
 from dotenv import load_dotenv
 from uagents import Agent, Context
@@ -181,6 +181,13 @@ async def poll_status(ctx: Context) -> None:
         ctx.logger.warning("STATUS_AGENT_ADDRESS not set — watchdog idle")
         return
 
+    # Drop checks that never got a response (status_agent down or restarted)
+    cutoff = datetime.now(UTC) - timedelta(seconds=_INTERVAL * 2)
+    stale_ids = [k for k, v in _pending_checks.items() if v < cutoff]
+    for k in stale_ids:
+        ctx.logger.warning(f"Watchdog check {k} never received a response — dropping")
+        del _pending_checks[k]
+
     req_id = str(uuid.uuid4())
     _pending_checks[req_id] = datetime.now(UTC)
 
@@ -269,7 +276,7 @@ async def handle_action_response(ctx: Context, sender: str, msg: ActionResponse)
 # Startup
 # ---------------------------------------------------------------------------
 
-@agent.on_startup()
+@agent.on_event("startup")
 async def on_startup(ctx: Context) -> None:
     ctx.logger.info(
         f"Watchdog Agent online | address={ctx.agent.address} | port={_PORT}"
@@ -288,3 +295,4 @@ async def on_startup(ctx: Context) -> None:
 
 if __name__ == "__main__":
     agent.run()
+

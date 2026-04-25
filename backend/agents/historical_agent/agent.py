@@ -14,7 +14,7 @@ To activate Tier 1:
   1. Run:  python data/seed_db.py   (seeds docs + embeddings into MongoDB)
   2. Create the vector index in Atlas UI (seed_db.py prints instructions).
 
-Run: python agents/historical_agent/agent.py
+Run: python backend/agents/historical_agent/agent.py
 """
 
 import glob
@@ -26,7 +26,7 @@ from datetime import datetime, UTC
 from typing import Optional
 
 from dotenv import load_dotenv
-from uagents import Agent, Context
+from uagents import Agent, Context, Model
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -41,9 +41,10 @@ from models import RAGRequest, RAGResponse
 _SEED = os.getenv("HISTORICAL_AGENT_SEED", "historical_agent_standin_seed_v1")
 _PORT = int(os.getenv("HISTORICAL_AGENT_PORT", "8009"))
 _GEMINI_KEY   = os.getenv("GEMINI_API_KEY", "")
+_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _MONGODB_URI  = os.getenv("MONGODB_URI", "")
 _VECTOR_INDEX = os.getenv("VECTOR_INDEX_NAME", "standin_vector_index")
-_EMBED_MODEL  = "text-embedding-004"   # 768-dim, free tier, fast
+_EMBED_MODEL  = "models/gemini-embedding-001"   # 768-dim
 
 agent = Agent(
     name="historical_agent",
@@ -77,12 +78,13 @@ def _get_db():
 
 
 async def _embed(text: str) -> list[float]:
-    """Embed a single text string using Gemini text-embedding-004."""
     from google import genai
+    from google.genai import types
     client = genai.Client(api_key=_GEMINI_KEY)
     result = await client.aio.models.embed_content(
         model=_EMBED_MODEL,
         contents=text,
+        config=types.EmbedContentConfig(output_dimensionality=768),
     )
     return result.embeddings[0].values
 
@@ -219,7 +221,7 @@ async def _synthesize(
 
     client = genai.Client(api_key=_GEMINI_KEY)
     resp = await client.aio.models.generate_content(
-        model="gemini-2.0-flash",
+        model=_GEMINI_MODEL,
         contents=prompt,
         config=gt.GenerateContentConfig(system_instruction=_SYSTEM),
     )
@@ -313,7 +315,7 @@ def _build_seed_cache() -> list[dict]:
     return docs
 
 
-@agent.on_startup()
+@agent.on_event("startup")
 async def on_startup(ctx: Context):
     global _SEED_DOCS
     _SEED_DOCS = _build_seed_cache()
@@ -327,6 +329,12 @@ async def on_startup(ctx: Context):
         f"Tier 2 (keyword): {len(_SEED_DOCS)} docs loaded | "
         f"Gemini: {'configured' if _GEMINI_KEY else 'not configured'}"
     )
+    if not _MONGODB_URI or not _GEMINI_KEY:
+        missing = [k for k, v in [("MONGODB_URI", _MONGODB_URI), ("GEMINI_API_KEY", _GEMINI_KEY)] if not v]
+        ctx.logger.warning(
+            f"{', '.join(missing)} not set — Tier 1 vector search DISABLED. "
+            "Falling back to keyword search only."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -335,12 +343,28 @@ async def on_startup(ctx: Context):
 
 @agent.on_message(RAGRequest)
 async def handle_rag(ctx: Context, sender: str, msg: RAGRequest):
+    # NOTE: this agent receives typed uAgents messages, NOT Chat Protocol.
+    # Orchestrator must call: await ctx.send(HISTORICAL_AGENT_ADDRESS, RAGRequest(...))
     ctx.logger.info(
         f"RAGRequest | id={msg.request_id} | "
         f"question='{msg.question[:60]}' | "
         f"role_filter={msg.role_filter} | top_k={msg.top_k or 5}"
     )
+    try:
+        await _handle_rag_inner(ctx, sender, msg)
+    except Exception as exc:
+        ctx.logger.error(f"handle_rag crashed: {exc}", exc_info=True)
+        await ctx.send(sender, RAGResponse(
+            request_id=msg.request_id,
+            question=msg.question,
+            answer="Internal error — RAG handler crashed. Check agent logs.",
+            source_ids=[],
+            confidence=0.0,
+            retrieval_method="no_results",
+        ))
 
+
+async def _handle_rag_inner(ctx: Context, sender: str, msg: RAGRequest):
     top_k = msg.top_k or 5
     docs: list[dict] = []
     retrieval_method = "no_results"
@@ -387,5 +411,31 @@ async def handle_rag(ctx: Context, sender: str, msg: RAGRequest):
     await ctx.send(sender, response)
 
 
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+class _HealthResponse(Model):
+    status: str
+    agent: str
+    tier1: str
+    docs_loaded: int
+    gemini: str
+    timestamp: str
+
+
+@agent.on_rest_get("/health", _HealthResponse)
+async def health(ctx: Context) -> _HealthResponse:
+    return _HealthResponse(
+        status="ok",
+        agent="historical_agent",
+        tier1="ready" if (_MONGODB_URI and _GEMINI_KEY) else "not configured",
+        docs_loaded=len(_SEED_DOCS),
+        gemini="configured" if _GEMINI_KEY else "not configured",
+        timestamp=datetime.now(UTC).isoformat(),
+    )
+
+
 if __name__ == "__main__":
     agent.run()
+
