@@ -1,0 +1,13 @@
+{
+  "id": "doc_incident_risk",
+  "filename": "incident_risk.md",
+  "title": "Incident Risk Assessment — Launch Alpha",
+  "type": "risk_assessment",
+  "author": "derek.vasquez",
+  "role": "Engineering",
+  "timestamp": "2026-04-24T23:00:00Z",
+  "tags": ["launch-alpha", "security", "risk", "incident", "cve"],
+  "source_system": "notion",
+  "sensitive_flags": ["security_risk"],
+  "content": "# Incident Risk Assessment — Launch Alpha\n\n**Author:** Derek Vasquez, Lead Engineer\n**Date:** April 24, 2026\n**Review Scope:** Pre-launch security and incident readiness\n\n## Known Vulnerabilities in Dependency Stack\n\n### High Priority\n**CVE-2024-38112** — Affects the `checkout-render` package (v1.4.2) used in the launch page build. This CVE describes a DOM-based XSS vulnerability triggered via crafted cart metadata. Our implementation does not pass untrusted metadata to the render layer, so direct exploitation risk is low in our context, but the package should be updated post-launch.\n\n**Mitigation:** Input sanitization is in place on the cart metadata API. Patch to `checkout-render` v1.4.5 (which resolves CVE-2024-38112) is scheduled for the Sprint 5 patch cycle — not blocking launch, but must be tracked.\n\n### Medium Priority\n- Dependency `ai-intent-parser` has an out-of-date transitive dependency on `axios` (known SSRF vector in older versions). Upgrading to ai-intent-parser v2.1.0 resolves this. Scheduled for post-launch Sprint 5.\n\n## Incident Response Plan\n- On-call engineer: Derek Vasquez (primary), Kai Torres (secondary)\n- Rollback procedure: documented in deployment runbook\n- P0 escalation: Alice Chen (Product) + Slack #incidents channel\n\n## Launch Readiness from Security Perspective\nNo launch-blocking security issues. CVE-2024-38112 is tracked and mitigated. Proceed with launch on schedule pending resolution of NOVA-142."
+}

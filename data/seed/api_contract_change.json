@@ -1,0 +1,13 @@
+{
+  "id": "doc_api_contract_change",
+  "filename": "api_contract_change.md",
+  "title": "API Contract Change — Checkout Endpoint",
+  "type": "engineering_doc",
+  "author": "derek.vasquez",
+  "role": "Engineering",
+  "timestamp": "2026-04-25T02:00:00Z",
+  "tags": ["launch-alpha", "api", "breaking-change", "v2", "checkout"],
+  "source_system": "notion",
+  "sensitive_flags": [],
+  "content": "# API Contract Change — Checkout Endpoint\n\n**Posted:** 2026-04-25 02:00 AM PT\n**Author:** Derek Vasquez, Lead Engineer\n**Severity:** BREAKING\n\n## What Changed\nThe checkout API endpoint has been migrated from `/v1/checkout` to `/v2/checkout` as part of the infrastructure upgrade completed overnight.\n\n## Old Endpoint\n```\nPOST /v1/checkout\nHost: api.novaloop.io\n```\n\n## New Endpoint\n```\nPOST /v2/checkout\nHost: api.novaloop.io\n```\n\n## What Broke\nThe launch page integration currently hardcodes the `/v1/checkout` path. This will return a 404 on production.\n\n## Action Required\n- Engineering: Update launch page integration to call `/v2/checkout` (tracked in NOVA-142)\n- QA: Rerun smoke tests after fix is merged — do not sign off until NOVA-142 is resolved\n- Product/GTM: Launch is at risk until NOVA-142 is resolved\n\n## Response Payload Changes\nThe v2 endpoint also returns an additional `session_id` field in the response. SDK consumers should be updated to handle this.\n\n## Timeline\n- Migration completed: 2026-04-25 01:45 AM PT\n- Issue detected: 2026-04-25 02:00 AM PT\n- NOVA-142 filed: 2026-04-25 02:30 AM PT"
+}
