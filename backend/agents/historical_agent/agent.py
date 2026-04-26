@@ -1,6 +1,7 @@
 import asyncio
 import glob
 import json
+import logging
 import math
 import os
 import re
@@ -34,6 +35,7 @@ _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _MONGODB_URI  = os.getenv("MONGODB_URI", "")
 _VECTOR_INDEX = os.getenv("VECTOR_INDEX_NAME", "standin_vector_index")
 _EMBED_MODEL  = "models/gemini-embedding-001"   # 768-dim
+_LOGGER = logging.getLogger("historical_agent")
 
 # Gemini client — created once to reuse TCP/TLS connection across all calls
 _GEMINI_CLIENT = None
@@ -42,7 +44,11 @@ _GEMINI_CLIENT = None
 def _get_gemini_client():
     global _GEMINI_CLIENT
     if _GEMINI_CLIENT is None and _GEMINI_KEY:
-        from google import genai
+        try:
+            from google import genai
+        except ImportError as exc:
+            _LOGGER.warning(f"Gemini client unavailable (google.genai import failed): {exc}")
+            return None
         _GEMINI_CLIENT = genai.Client(api_key=_GEMINI_KEY)
     return _GEMINI_CLIENT
 
@@ -276,9 +282,24 @@ async def _synthesize(
         "If the context does not contain the answer, say so clearly."
     )
 
-    from google.genai import types as gt
-
     client = _get_gemini_client()
+    if client is None:
+        if not docs:
+            return "No relevant documents found and Gemini client is unavailable.", 0.1
+        snippets = [
+            f"[{d.get('id', '?')}] {d.get('title', '')}: {d.get('content', '')[:200]}"
+            for d in docs
+        ]
+        return "Based on retrieved documents:\n\n" + "\n\n".join(snippets), 0.45
+    try:
+        from google.genai import types as gt
+    except ImportError as exc:
+        _LOGGER.warning(f"Gemini types unavailable (google.genai import failed): {exc}")
+        snippets = [
+            f"[{d.get('id', '?')}] {d.get('title', '')}: {d.get('content', '')[:200]}"
+            for d in docs
+        ]
+        return "Based on retrieved documents:\n\n" + "\n\n".join(snippets), 0.45
     resp = await client.aio.models.generate_content(
         model=_GEMINI_MODEL,
         contents=prompt,
