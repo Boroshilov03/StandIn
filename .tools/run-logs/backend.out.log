@@ -1,0 +1,48 @@
+WARNING:  [bureau]: Overwriting the agent's endpoints [AgentEndpoint(url='http://localhost:8007/submit', weight=1)] with the Bureau's endpoints [AgentEndpoint(url='http://localhost:8000/submit', weight=1)].
+WARNING:  [bureau]: Overwriting the agent's endpoints [AgentEndpoint(url='http://localhost:8009/submit', weight=1)] with the Bureau's endpoints [AgentEndpoint(url='http://localhost:8000/submit', weight=1)].
+WARNING:  [bureau]: Overwriting the agent's endpoints [AgentEndpoint(url='http://localhost:8008/submit', weight=1)] with the Bureau's endpoints [AgentEndpoint(url='http://localhost:8000/submit', weight=1)].
+
+=== StandIn Topology ===
+  Bureau Port:      8000
+  Local Submit:     http://localhost:8000/submit
+  Orchestrator:     agent1qwhc8wyvhza0rfj0r6xgysmeew4hrz5z9eh4j8nrrzs7sf90j2pyudu0nnc (mailbox)
+  Status Agent:     agent1q2l8xf3dvwvmarl2dpxwtv5ym7pvge53szhstykukmrwuhm93z6k68tphgh (local endpoint)
+  Historical Agent: agent1qf60yzmr9reyjnduq8qneum5nf03zzaw60cl6yny9l7la676unf7jdfdtrv (local endpoint)
+  Perform Action:   agent1qf83fffdv22j2etuqarww9nwqcenq5zavvekh7k2utflqaxx08j4x38e69v (local endpoint)
+========================
+
+INFO:     [standin_orchestrator]: Starting agent with address: agent1qwhc8wyvhza0rfj0r6xgysmeew4hrz5z9eh4j8nrrzs7sf90j2pyudu0nnc
+INFO:     [status_agent]: Starting agent with address: agent1q2l8xf3dvwvmarl2dpxwtv5ym7pvge53szhstykukmrwuhm93z6k68tphgh
+INFO:     [historical_agent]: Starting agent with address: agent1qf60yzmr9reyjnduq8qneum5nf03zzaw60cl6yny9l7la676unf7jdfdtrv
+INFO:     [perform_action]: Starting agent with address: agent1qf83fffdv22j2etuqarww9nwqcenq5zavvekh7k2utflqaxx08j4x38e69v
+INFO:     [standin_orchestrator]: Almanac contract registration is up to date!
+INFO:     [standin_orchestrator]: Orchestrator online | address=agent1qwhc8wyvhza0rfj0r6xgysmeew4hrz5z9eh4j8nrrzs7sf90j2pyudu0nnc | port=8000
+INFO:     [standin_orchestrator]: Gemini: configured — model=gemini-2.5-flash
+INFO:     [standin_orchestrator]: Sub-agent addresses:
+  status_agent      [env] = agent1q2l8xf3dvwvmarl2dpxwtv5ym7pvge53szhstykukmrwuhm93z6k68tphgh
+  historical_agent  [env] = agent1qf60yzmr9reyjnduq8qneum5nf03zzaw60cl6yny9l7la676unf7jdfdtrv
+  perform_action    [env] = agent1qf83fffdv22j2etuqarww9nwqcenq5zavvekh7k2utflqaxx08j4x38e69v
+INFO:     [standin_orchestrator]: Routing table: status/conflict/briefing → status_agent | history → fanout(historical+status) | action → perform_action
+INFO:     [status_agent]: Registering on almanac contract...
+INFO:     [status_agent]: RAG load: mongodb | 84 docs | roles=['', 'Design', 'Engineering', 'Product', 'GTM'] | sample_titles=['Checkout API Contract Change — /v1 → /v2', 'NOVA-142 Engineering Notes — Launch Page v2 Integration', 'Checkout AI Assistant — Beta NPS & User Feedback Summary', 'Launch Page Design Handoff — Final Assets Delivered', 'Slack Message — Design: Launch Page Ready']
+INFO:     [status_agent]: Status Agent online | address=agent1q2l8xf3dvwvmarl2dpxwtv5ym7pvge53szhstykukmrwuhm93z6k68tphgh | port=8007
+INFO:     [status_agent]: Gemini: configured (ok) | Tools: 2 connected (slack, rag_docs), 4 stubs | RAG corpus: mongodb (84 docs) | Roles: ['Engineering', 'Design', 'GTM', 'Product']
+INFO:     [historical_agent]: Registering on almanac contract...
+INFO:     [historical_agent]: Historical Agent online | address=agent1qf60yzmr9reyjnduq8qneum5nf03zzaw60cl6yny9l7la676unf7jdfdtrv | port=8009
+INFO:     [historical_agent]: Tier 1 (vector search): ready | Tier 2 (keyword): 25 docs loaded | Gemini: configured
+INFO:     [perform_action]: Registering on almanac contract...
+INFO:     [perform_action]: Perform Action online | address=agent1qf83fffdv22j2etuqarww9nwqcenq5zavvekh7k2utflqaxx08j4x38e69v | port=8008
+INFO:     [perform_action]: MongoDB: connected | Live: ['create_action_item', 'post_brief'] | Approval-gated: ['schedule_meeting', 'send_slack', 'send_email'] | Stubs: ['draft_slack', 'create_jira', 'update_jira_status', 'add_calendar_reminder', 'read_calendar_events', 'read_calendar_event']
+INFO:     [bureau]: Starting server on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     [standin_orchestrator]: Starting mailbox client for https://agentverse.ai
+INFO:     [standin_orchestrator]: Mailbox access token acquired
+INFO:     [bureau]: Batch registration on Almanac API successful
+INFO:     [status_agent]: Registering on almanac contract...complete
+INFO:     [historical_agent]: Registering on almanac contract...complete
+INFO:     [perform_action]: Registering on almanac contract...complete
+INFO:     [perform_action]: Conversation started | id=conv-e34c357af0 | action=a-8e51-product-brief | type=schedule_meeting | steps=12
+INFO:     [perform_action]: notify | conversation.resolved | success | Agents resolved: Cross-team Go/No-Go reschedule
+WARNING:  [standin_orchestrator]: Access token expired: a new one should be retrieved automatically
+INFO:     [perform_action]: Conversation started | id=conv-3b47088739 | action=a-9f02-blocker-nova142 | type=send_slack | steps=8
+INFO:     [standin_orchestrator]: Mailbox access token acquired
+INFO:     [perform_action]: notify | conversation.resolved | success | Agents resolved: NOVA-142 — Update launch page for v2 checkout
