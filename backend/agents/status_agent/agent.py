@@ -1,19 +1,3 @@
-"""
-Status Agent — StandIn  (port 8007)
-
-Single-hop replacement for the 4 delegate agents + info_collector + verifier.
-The orchestrator sends one FullBriefRequest and receives one FullBriefResponse
-containing every role's status, detected contradictions, and the Evidence Passport.
-
-Pipeline per request:
-  Phase 1 — Tool queries   : parallel per-role data gathering (stubs now, MCP later)
-  Phase 2 — Synthesis      : parallel Gemini claim extraction per role
-  Phase 3 — Contradictions : rule engine (always) + Gemini validation (when available)
-  Phase 4 — Passports      : Evidence Passport for every high-risk / contested claim
-
-Run: python backend/agents/status_agent/agent.py
-"""
-
 import asyncio
 import glob
 import json
@@ -31,16 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
-<<<<<<< HEAD
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
-
-from data.company_data import CALENDAR, JIRA, SLACK, USERS
-=======
 from data_engineering.company_data import CALENDAR, JIRA, SLACK, USERS
->>>>>>> main
 from models import (
     Claim,
     EvidencePassport,
@@ -67,6 +42,17 @@ _SLACK_BOT_TOKEN  = os.getenv("SLACK_BOT_TOKEN",  "")
 _SLACK_USER_TOKEN = os.getenv("SLACK_USER_TOKEN",  "")
 _LOGGER = logging.getLogger("status_agent")
 
+
+def _ensure_event_loop() -> None:
+    """Python 3.14 no longer provides an implicit main-thread loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+_ensure_event_loop()
+
 # Channel name → Slack channel ID; populated lazily by _slack_list_channels()
 _slack_ch_cache: dict[str, str] = {}
 _slack_ch_cache_ts: float = 0.0
@@ -75,12 +61,8 @@ agent = Agent(
     name="status_agent",
     seed=_SEED,
     port=_PORT,
-<<<<<<< HEAD
-    endpoint=[_ENDPOINT],
-=======
->>>>>>> main
-    mailbox=False,
-    publish_agent_details=False,
+    endpoint=[f"http://localhost:{_PORT}/submit"],
+    network="testnet"
 )
 
 _STALE_HOURS = 48  # claims sourced from docs older than this are flagged stale

@@ -1,23 +1,3 @@
-"""
-Perform Action Agent — StandIn  (port 8008)
-
-Executes actions on behalf of the orchestrator or escalation agent.
-Each action stub documents exactly which MCP tool replaces it.
-MongoDB-backed actions (create_action_item, post_brief) work today when
-MONGODB_URI is set. All others return stub confirmations until MCP is wired.
-
-Human approval gate
--------------------
-Actions in _APPROVAL_REQUIRED are not executed immediately. They are saved to
-standin.pending_approvals and a pending response is returned. A human then
-calls the REST endpoints to approve or reject:
-
-  GET  /approvals          — list all pending actions
-  POST /approvals/approve  — approve and execute (body: ApproveRequest)
-  POST /approvals/reject   — reject without executing (body: RejectRequest)
-
-Run: python backend/agents/perform_action/agent.py
-"""
 import asyncio
 import json
 import logging
@@ -34,16 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
-<<<<<<< HEAD
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
-
-from data.company_data import CALENDAR, JIRA, SLACK, USERS
-=======
 from data_engineering.company_data import CALENDAR, JIRA, SLACK, USERS
->>>>>>> main
 from models import (
     ActionRequest,
     ActionResponse,
@@ -59,6 +30,44 @@ from models import (
     RejectRequest,
     RejectResponse,
 )
+try:
+    from schemas.action_payloads import normalize_action_payload
+except Exception:
+    def normalize_action_payload(action_type: str, payload: dict, context: dict):
+        """
+        Lightweight fallback normalizer for local/dev runs.
+        Returns: (ok, normalized_payload, error_message)
+        """
+        if not isinstance(payload, dict):
+            return False, {}, "Payload must be a JSON object."
+
+        normalized = dict(payload)
+        if action_type == "send_slack":
+            owner = (context or {}).get("owner") or ""
+            if owner and not normalized.get("user_id"):
+                normalized["user_id"] = owner
+        return True, normalized, None
+
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from services.calendar_service import create_event
+    from services.calendar_service import add_reminder as add_calendar_reminder
+    from services.calendar_service import get_event as get_calendar_event
+    from services.calendar_service import list_events as list_calendar_events
+    from services.slack_service import post_as_user
+    from services.jira_service import create_ticket as create_jira_ticket
+    from services.jira_service import update_ticket_status as update_jira_ticket_status
+except Exception:
+    create_event = None
+    add_calendar_reminder = None
+    get_calendar_event = None
+    list_calendar_events = None
+    post_as_user = None
+    create_jira_ticket = None
+    update_jira_ticket_status = None
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
@@ -82,20 +91,26 @@ except Exception:
 # ---------------------------------------------------------------------------
 _SEED = os.getenv("PERFORM_ACTION_SEED", "perform_action_standin_seed_v1")
 _PORT = int(os.getenv("PERFORM_ACTION_PORT", "8008"))
-_ENDPOINT = os.getenv("PERFORM_ACTION_ENDPOINT", f"http://127.0.0.1:{_PORT}/submit")
 _MONGODB_URI = os.getenv("MONGODB_URI", "")
 _LOGGER = logging.getLogger("perform_action")
+
+
+def _ensure_event_loop() -> None:
+    """Python 3.14 no longer provides an implicit main-thread loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+_ensure_event_loop()
 
 agent = Agent(
     name="perform_action",
     seed=_SEED,
     port=_PORT,
-<<<<<<< HEAD
-    endpoint=[_ENDPOINT],
-=======
->>>>>>> main
-    mailbox=False,
-    publish_agent_details=False,
+    endpoint=[f"http://localhost:{_PORT}/submit"],
+    network="testnet"
 )
 
 
@@ -286,37 +301,63 @@ async def _action_draft_slack(action_id: str, payload: dict, priority: str) -> t
 
 async def _action_create_jira(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
     """
-    STUB — mcp__claude_ai_Atlassian__createJiraIssue
-    Connect: call createJiraIssue(project=..., summary=..., description=..., priority=...).
-
-    payload: { project: str, summary: str, description: str, priority?: str, assignee?: str }
+    Live Jira create using services/jira_service.py
+    payload: {
+      summary?: str, description?: str, issuetype?: str, priority?: str,
+      labels?: list[str], status?: str, assignee_account_id?: str, sprint_name?: str
+    }
     """
-    summary = payload.get("summary", "(no summary)")
-    project = payload.get("project", "NOVA")
-    _LOGGER.info(
-        f"[STUB] create_jira | project={project} | summary='{summary}' | "
-        f"priority={priority} — Atlassian MCP not connected"
-    )
-    fake_id = f"{project}-{str(uuid.uuid4())[:4].upper()}"
-    result  = f"[stub] Jira ticket {fake_id} would be created. Summary: '{summary}'"
-    return True, result, True
+    if create_jira_ticket is None:
+        return False, "Jira service unavailable (missing dependencies or import path).", True
+
+    summary = (payload.get("summary") or "").strip() or "StandIn follow-up ticket"
+    description = (payload.get("description") or "").strip() or payload.get("original_request", "") or summary
+    labels = payload.get("labels")
+    if not isinstance(labels, list):
+        labels = ["standin", "auto-created"]
+
+    details = {
+        "summary": summary,
+        "description": description,
+        "issuetype": (payload.get("issuetype") or "Task").strip() or "Task",
+        "priority": (payload.get("priority") or "Medium").strip() or "Medium",
+        "labels": labels,
+        "status": (payload.get("status") or "To Do").strip() or "To Do",
+        "assignee_account_id": (payload.get("assignee_account_id") or "").strip(),
+        "sprint_name": (payload.get("sprint_name") or "Sprint 1").strip() or "Sprint 1",
+    }
+
+    try:
+        created = create_jira_ticket(details)
+        payload["jira_issue_key"] = created.get("issueKey", "")
+        payload["jira_url"] = created.get("url", "")
+        warnings = []
+        if created.get("transitionWarning"):
+            warnings.append(f"transition: {created['transitionWarning']}")
+        if created.get("sprintWarning"):
+            warnings.append(f"sprint: {created['sprintWarning']}")
+        suffix = f" | warnings: {'; '.join(warnings)}" if warnings else ""
+        result = f"Jira ticket created: {payload['jira_issue_key']} ({payload['jira_url']}){suffix}"
+        return True, result, False
+    except Exception as exc:
+        return False, f"Jira create failed: {exc}", False
 
 
 async def _action_update_jira_status(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
     """
-    STUB — mcp__claude_ai_Atlassian__transitionJiraIssue
-    Connect: call getTransitionsForJiraIssue + transitionJiraIssue.
-
     payload: { ticket_id: str, new_status: str, comment?: str }
     """
-    ticket_id  = payload.get("ticket_id", "")
-    new_status = payload.get("new_status", "")
-    _LOGGER.info(
-        f"[STUB] update_jira_status | ticket={ticket_id} | status={new_status} — "
-        f"Atlassian MCP not connected"
-    )
-    result = f"[stub] {ticket_id} would be transitioned to '{new_status}'."
-    return True, result, True
+    if update_jira_ticket_status is None:
+        return False, "Jira service unavailable (missing dependencies or import path).", True
+    ticket_id = (payload.get("ticket_id") or payload.get("issue_key") or "").strip()
+    new_status = (payload.get("new_status") or "In Progress").strip()
+    if not ticket_id:
+        return False, "update_jira_status requires payload.ticket_id", False
+    try:
+        update_jira_ticket_status(ticket_id, new_status)
+        return True, f"Jira ticket {ticket_id} moved to '{new_status}'.", False
+    except Exception as exc:
+        return False, f"Jira status update failed: {exc}", False
 
 
 async def _action_schedule_meeting(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
@@ -601,10 +642,33 @@ async def _handle_action_inner(ctx: Context, sender: str, msg: ActionRequest):
     action_id = str(uuid.uuid4())
     priority  = msg.priority or "normal"
 
+    ok, normalized_payload, validation_error = normalize_action_payload(
+        msg.action_type,
+        payload,
+        {
+            "owner": msg.owner,
+            "title": msg.title,
+            "summary": msg.summary,
+            "context": msg.context,
+            "priority": msg.priority,
+        },
+    )
+    if not ok:
+        response = ActionResponse(
+            request_id=msg.request_id,
+            action_type=msg.action_type,
+            success=False,
+            action_id=action_id,
+            error=validation_error or "Invalid payload.",
+            stub=False,
+        )
+        await ctx.send(sender, response)
+        return
+
     # ── Approval gate ──────────────────────────────────────────────────────
     if msg.action_type in _APPROVAL_REQUIRED and _MONGODB_URI:
         _save_pending_approval(
-            action_id, msg.action_type, payload, priority,
+            action_id, msg.action_type, normalized_payload, priority,
             requested_by=sender,
             title=msg.title or "",
             summary=msg.summary or msg.context or "",
