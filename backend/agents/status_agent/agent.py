@@ -19,6 +19,7 @@ import glob
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timedelta, UTC
@@ -40,6 +41,10 @@ from models import (
     VerifyRequest,
     VerifyResponse,
 )
+try:
+    from services.calendar_service import list_events as list_calendar_events
+except Exception:
+    list_calendar_events = None
 
 # ---------------------------------------------------------------------------
 # Agent
@@ -506,6 +511,51 @@ async def _tool_web_search(query: str, limit: int) -> list[dict]:
     return []
 
 
+def _calendar_window_from_text(text: str | None) -> tuple[str, str]:
+    """
+    Build a future-looking ISO-8601 window from user text.
+    Defaults to the next 7 days when no explicit range is present.
+    """
+    now = datetime.now(UTC)
+    days = 7
+    if text:
+        lowered = text.lower()
+        match = re.search(r"\bnext\s+(\d{1,2})\s+days?\b", lowered)
+        if match:
+            days = max(1, min(30, int(match.group(1))))
+        elif "today" in lowered:
+            days = 1
+        elif "tomorrow" in lowered:
+            days = 2
+        elif "this week" in lowered:
+            days = 7
+    end = now + timedelta(days=days)
+    return now.isoformat().replace("+00:00", "Z"), end.isoformat().replace("+00:00", "Z")
+
+
+async def _tool_calendar_upcoming(context_text: str | None, limit: int) -> list[dict]:
+    if list_calendar_events is None:
+        return []
+    try:
+        time_min, time_max = _calendar_window_from_text(context_text)
+        events = list_calendar_events(time_min=time_min, time_max=time_max, max_results=limit)
+        return [
+            {
+                "content": (
+                    f"{event.get('summary', '(untitled)')} | "
+                    f"start={event.get('start', {}).get('dateTime') or event.get('start', {}).get('date', '')} | "
+                    f"end={event.get('end', {}).get('dateTime') or event.get('end', {}).get('date', '')}"
+                ),
+                "source_id": event.get("id", ""),
+                "source_type": "calendar",
+                "timestamp": event.get("updated", ""),
+            }
+            for event in events
+        ]
+    except Exception:
+        return []
+
+
 TOOL_REGISTRY = {
     "slack":    {"fn": _tool_slack_search,        "connected": bool(_SLACK_BOT_TOKEN or _SLACK_USER_TOKEN), "mcp": "slack_api"},
     "jira":     {"fn": _tool_jira_search,         "connected": False, "mcp": "mcp__claude_ai_Atlassian"},
@@ -673,20 +723,24 @@ def _detect_deltas(
 # Phase 1 — per-role data gathering (parallel tool queries)
 # ---------------------------------------------------------------------------
 
-async def _gather_role_data(role: str) -> dict:
-    """
-    Fire all three tool queries for this role simultaneously and wait for all to finish.
-    Parallel calls: slack_search || jira_search || rag_query
-    """
+async def _gather_role_data(role: str, context_text: str | None = None) -> dict:
     cfg = ROLE_CONFIGS[role]
     team = cfg["team"]
     team_users = _TEAM_USERS.get(team) if team else None
 
-    # All three IO-bound tool calls run concurrently — none blocks the others
-    slack_results, jira_results, rag_results = await asyncio.gather(
-        _tool_slack_search(cfg["slack_queries"], team, limit=6),
-        _tool_jira_search(cfg["jira_query"], team_users, limit=6),
-        _tool_rag_query(cfg["jira_query"], team, limit=4),
+    slack_task = asyncio.create_task(
+        _tool_slack_search(cfg["slack_queries"], team, limit=6)
+    )
+    jira_task = asyncio.create_task(
+        _tool_jira_search(cfg["jira_query"], team_users, limit=6)
+    )
+    rag_task = asyncio.create_task(
+        _tool_rag_query(cfg["jira_query"], team, limit=4)
+    )
+    calendar_task = asyncio.create_task(_tool_calendar_upcoming(context_text, limit=8))
+
+    slack_results, jira_results, rag_results, calendar_results = await asyncio.gather(
+        slack_task, jira_task, rag_task, calendar_task
     )
 
     return {
@@ -695,7 +749,7 @@ async def _gather_role_data(role: str) -> dict:
         "slack_messages": slack_results,
         "jira_tickets":   jira_results,
         "seed_docs":      rag_results,
-        "calendar":       [
+        "calendar":       calendar_results or [
             v for v in CALENDAR.values()
             if team_users is None or any(u in v["attendees"] for u in team_users)
         ],
@@ -1071,17 +1125,8 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
             f"prior_brief_at={last_brief.get('saved_at', '?')}"
         )
 
-    # ── Phase 1: gather raw data — all roles in parallel ─────────────────
-    # asyncio.gather fires all _gather_role_data coroutines simultaneously.
-    # Each coroutine itself runs slack + jira + rag in parallel (see _gather_role_data).
-    # So at peak this runs len(roles) * 3 tool calls concurrently.
-    t1 = time.monotonic()
-    gather_results = await asyncio.gather(
-        *[_gather_role_data(role) for role in roles],
-        return_exceptions=True,
-    )
-    t1_ms = int((time.monotonic() - t1) * 1000)
-
+    # ── Phase 1: gather raw data per role (parallel) ──────────────────────
+    gather_tasks = {role: asyncio.create_task(_gather_role_data(role, msg.context)) for role in roles}
     raw_data: dict[str, dict] = {}
     tool_counts: dict[str, int] = {}
     for role, result in zip(roles, gather_results):

@@ -21,9 +21,10 @@ import glob
 import json
 import math
 import os
+import re
 import sys
+from datetime import datetime, timedelta, UTC
 import uuid
-from datetime import datetime, UTC
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -35,6 +36,10 @@ load_dotenv()
 
 from data_engineering.company_data import CALENDAR, JIRA, SLACK, USERS
 from models import RAGRequest, RAGResponse
+try:
+    from services.calendar_service import list_events as list_calendar_events
+except Exception:
+    list_calendar_events = None
 
 # ---------------------------------------------------------------------------
 # Agent
@@ -177,6 +182,56 @@ def _keyword_search(
 
     scored.sort(key=lambda x: -x[0])
     return [doc for _, doc in scored[:top_k]]
+
+
+def _is_past_calendar_question(question: str) -> bool:
+    lowered = question.lower()
+    calendar_terms = ("meeting", "meetings", "calendar", "event", "events")
+    past_terms = ("past", "previous", "last", "earlier", "history", "had", "happened")
+    return any(term in lowered for term in calendar_terms) and any(term in lowered for term in past_terms)
+
+
+def _past_days_from_question(question: str) -> int:
+    lowered = question.lower()
+    match = re.search(r"\blast\s+(\d{1,3})\s+days?\b", lowered)
+    if match:
+        return max(1, min(365, int(match.group(1))))
+    if "last week" in lowered:
+        return 7
+    if "last month" in lowered:
+        return 30
+    return 30
+
+
+def _calendar_history_search(question: str, top_k: int) -> list[dict]:
+    if list_calendar_events is None:
+        return []
+    try:
+        now = datetime.now(UTC)
+        days = _past_days_from_question(question)
+        start = (now - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+        end = now.isoformat().replace("+00:00", "Z")
+        events = list_calendar_events(time_min=start, time_max=end, max_results=top_k)
+        docs: list[dict] = []
+        for event in events:
+            docs.append({
+                "id": event.get("id", ""),
+                "title": event.get("summary", "(untitled)"),
+                "type": "calendar_event",
+                "role": "",
+                "tags": ["calendar", "meeting", "google_calendar"],
+                "timestamp": event.get("updated", ""),
+                "content": (
+                    f"Title: {event.get('summary', '')}\n"
+                    f"Description: {event.get('description', '')}\n"
+                    f"Start: {event.get('start', {}).get('dateTime') or event.get('start', {}).get('date', '')}\n"
+                    f"End: {event.get('end', {}).get('dateTime') or event.get('end', {}).get('date', '')}\n"
+                    f"Attendees: {', '.join(a.get('email', '') for a in event.get('attendees', []))}"
+                ),
+            })
+        return docs
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -380,8 +435,14 @@ async def _handle_rag_inner(ctx: Context, sender: str, msg: RAGRequest):
     docs: list[dict] = []
     retrieval_method = "no_results"
 
+    if _is_past_calendar_question(msg.question):
+        docs = _calendar_history_search(msg.question, top_k)
+        if docs:
+            retrieval_method = "calendar_api"
+            ctx.logger.info(f"Calendar history search returned {len(docs)} events")
+
     # ── Tier 1: Vector Search ─────────────────────────────────────────────
-    if _MONGODB_URI and _GEMINI_KEY:
+    if not docs and _MONGODB_URI and _GEMINI_KEY:
         try:
             docs = await _vector_search(msg.question, msg.role_filter, top_k)
             if docs:
