@@ -87,6 +87,17 @@ def _get_gemini_client():
         _GEMINI_CLIENT = genai.Client(api_key=_GEMINI_KEY)
     return _GEMINI_CLIENT
 
+
+def _gemini_runtime_ready() -> tuple[bool, str]:
+    """Return whether Gemini can be used in this runtime."""
+    if not _GEMINI_KEY:
+        return False, "GEMINI_API_KEY not configured"
+    try:
+        from google import genai  # noqa: F401
+    except ImportError as exc:
+        return False, f"google.genai unavailable ({exc})"
+    return True, "ok"
+
 _TEAM_USERS: dict[str, set[str]] = {
     team: {k for k, v in USERS.items() if v["team"] == team}
     for team in ("Engineering", "Design", "GTM", "Product")
@@ -1314,6 +1325,7 @@ def _load_rag_docs() -> tuple[list[dict], str]:
 async def on_startup(ctx: Context):
     global _RAG_DOCS
     _RAG_DOCS, rag_source = _load_rag_docs()
+    gemini_ready, gemini_reason = _gemini_runtime_ready()
 
     connected = [k for k, v in TOOL_REGISTRY.items() if v["connected"]]
     stub_count = len(TOOL_REGISTRY) - len(connected)
@@ -1321,7 +1333,8 @@ async def on_startup(ctx: Context):
         f"Status Agent online | address={ctx.agent.address} | port={_PORT}"
     )
     ctx.logger.info(
-        f"Gemini: {'configured' if _GEMINI_KEY else 'not configured — seeded fallback'} | "
+        f"Gemini: {'configured' if gemini_ready else 'unavailable — seeded fallback likely'} "
+        f"({gemini_reason}) | "
         f"Tools: {len(connected)} connected ({', '.join(connected)}), {stub_count} stubs | "
         f"RAG corpus: {rag_source} | "
         f"Roles: {ALL_ROLES}"
@@ -1343,7 +1356,8 @@ async def handle_full_brief(ctx: Context, sender: str, msg: FullBriefRequest):
     # Orchestrator must call: await ctx.send(STATUS_AGENT_ADDRESS, FullBriefRequest(...))
     ctx.logger.info(
         f"FullBriefRequest | id={msg.request_id} | "
-        f"user={msg.user_email} | topic='{msg.topic}'"
+        f"user={msg.user_email} | sender={sender[:24]}… | "
+        f"topic='{msg.topic}' | roles={msg.roles or ALL_ROLES}"
     )
     try:
         brief = await _run_brief_pipeline(ctx, msg)
@@ -1435,16 +1449,22 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
 
     role_responses: list[MeetingResponse] = []
     used_fallback = False
+    fallback_reasons: dict[str, str] = {}
 
     for role, synth in zip(roles, synth_results):
+        role_fallback_reason = ""
         if isinstance(synth, Exception):
             ctx.logger.warning(f"Synthesis task raised for {role}: {synth}")
+            role_fallback_reason = f"synthesis_exception: {synth}"
             synth = None
 
         is_fallback = synth is None
         if is_fallback:
             synth = _FALLBACKS[role]
             used_fallback = True
+            if not role_fallback_reason:
+                role_fallback_reason = "synthesis_returned_none"
+            fallback_reasons[role] = role_fallback_reason
 
         claims = [
             Claim(
@@ -1546,6 +1566,12 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
     })
 
     statuses = {r.role: r.status for r in role_responses}
+    if used_fallback:
+        ctx.logger.warning(
+            "Fallback map | id=%s | reasons=%s",
+            msg.request_id,
+            fallback_reasons,
+        )
     ctx.logger.info(
         f"Brief ready | {t_total_ms}ms total "
         f"(p1={t1_ms}ms gather, p2={t2_ms}ms synthesis, p3={t3_ms}ms contradict) | "

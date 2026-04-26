@@ -81,9 +81,16 @@ orchestrator = Agent(
     network="testnet"
 )
 
-STATUS_AGENT_ADDRESS = os.getenv("STATUS_AGENT_ADDRESS")
-HISTORICAL_AGENT_ADDRESS = os.getenv("HISTORICAL_AGENT_ADDRESS")
-PERFORM_ACTION_ADDRESS = os.getenv("PERFORM_ACTION_ADDRESS")
+def _normalize_agent_address(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    cleaned = raw.strip().strip("'").strip('"')
+    return cleaned or None
+
+
+STATUS_AGENT_ADDRESS = _normalize_agent_address(os.getenv("STATUS_AGENT_ADDRESS"))
+HISTORICAL_AGENT_ADDRESS = _normalize_agent_address(os.getenv("HISTORICAL_AGENT_ADDRESS"))
+PERFORM_ACTION_ADDRESS = _normalize_agent_address(os.getenv("PERFORM_ACTION_ADDRESS"))
 
 chat_proto = Protocol(spec=chat_protocol_spec)
 pending_requests: dict[str, dict] = {}
@@ -95,12 +102,7 @@ _request_sent_at: dict[str, float] = {}
 
 TEAM_ALIASES = {
     "engineering": "Engineering",
-    "eng": "Engineering",
     "product": "Product",
-    "pm": "Product",
-    "design": "Design",
-    "gtm": "GTM",
-    "marketing": "GTM",
 }
 
 ACTION_HINTS = {
@@ -117,17 +119,6 @@ ACTION_HINTS = {
 _CLASSIFIER_PROMPT = """
 You classify user requests for a coordination orchestrator called StandIn.
 
-## Company context
-Company: NovaLoop. Active project: "Checkout AI Assistant — Launch Alpha". Deadline: Monday 2026-04-28.
-Teams: Engineering, Design, GTM, Product.
-Known tickets: NOVA-139 (GTM launch email review, in progress), NOVA-140 (design asset sign-off, done),
-  NOVA-141 (GTM launch email review, blocked), NOVA-142 (checkout API /v1→/v2 migration, critical blocker),
-  NOVA-143 (QA smoke test sign-off, blocked).
-Known people: Alice Chen (Product Manager), Derek Vasquez (Lead Engineer, Engineering),
-  Priya Mehta (Design Lead), Sam Okafor (GTM Manager), Kai Torres (QA, Engineering),
-  Mira Lopez (Frontend, Engineering), Jules Park (Backend, Engineering).
-Known conflict: Design says launch page is ready; Engineering says NOVA-142 blocks checkout API.
-
 ## Sub-agents available
 - status_agent   : live status, blockers, conflict detection across teams (uses Slack + Jira + RAG)
 - historical_agent: past decisions, meeting notes, previous discussions (uses MongoDB vector/keyword search)
@@ -136,7 +127,7 @@ Known conflict: Design says launch page is ready; Engineering says NOVA-142 bloc
 ## Return strict JSON with this schema
 {
   "intent": "status_query|conflict_check|action_request|history_query|briefing_request",
-  "teams": ["Engineering" | "Design" | "GTM" | "Product"],
+  "teams": ["Engineering" | "Product" | "Operations],
   "topic": "short topic or null",
   "time_window": "short time window phrase or null",
   "action_type": "send_email|send_slack|draft_slack|create_jira|update_jira_status|schedule_meeting|create_action_item|post_brief|null",
@@ -153,13 +144,9 @@ Known conflict: Design says launch page is ready; Engineering says NOVA-142 bloc
                      (e.g. "anything about Derek", "what is Alice working on", "tell me about NOVA-141",
                       "give me information about NOVA-142", "what is NOVA-139")
 - action_request   = asks to send/create/update/schedule/post something
-- Any NOVA-XXX ticket lookup → history_query (the RAG corpus has all ticket history)
-- Any person name lookup → history_query
 - Calendar read requests (upcoming/current meetings) → status_query
 - Past calendar/meeting history → history_query
 - Calendar create/update requests → action_request (schedule_meeting)
-- Extract teams only from explicit team mentions.
-- Keep topic short and literal — include ticket ID if present (e.g. "NOVA-141 GTM launch email").
 - time_window should only be set when clearly present.
 - action_payload_json must be a compact JSON object string when action_request.
 - For create_jira payload: {summary, description, issuetype, priority, labels, status, sprint_name}

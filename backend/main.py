@@ -42,11 +42,11 @@ def _patch_agent_info() -> None:
 
 _patch_agent_info()
 
-# Import sub-agents first to get their computed local addresses
+# Import agents
+from agents.orchestrator.agent import orchestrator
 from agents.status_agent.agent import agent as status_agent
 from agents.historical_agent.agent import agent as historical_agent
 from agents.perform_action.agent import agent as perform_action_agent
-from agents.status_agent.agent import agent as status_agent
 # from agents.watchdog_agent.agent import agent as watchdog_agent  # disabled
 
 BUREAU_PORT = int(os.getenv("BUREAU_PORT", "8000"))
@@ -76,7 +76,9 @@ def _resolve_agentverse() -> str | None:
 
 def main():
     public_endpoint = _resolve_public_endpoint(BUREAU_PORT)
-    agentverse_url = _resolve_agentverse()
+    # Keep Bureau local (endpoint transport) so worker agents remain reachable on localhost.
+    # Orchestrator transport is configured in its own module and remains mailbox-enabled.
+    agentverse_url = None
     bureau = Bureau(
         port=BUREAU_PORT,
         endpoint=[public_endpoint],
@@ -90,11 +92,14 @@ def main():
 
     print("\n=== StandIn Topology ===")
     print(f"  Bureau Port:      {BUREAU_PORT}")
-    print(f"  Public Submit:    {public_endpoint}")
-    print(f"  Orchestrator:    {orchestrator.address}")
-
-    if agentverse_url:
-        print(f"  Agentverse URL:   {agentverse_url}")
+    print(f"  Local Submit:     {public_endpoint}")
+    print(f"  Orchestrator:     {orchestrator.address} (mailbox)")
+    print(f"  Status Agent:     {status_agent.address} (local endpoint)")
+    print(f"  Historical Agent: {historical_agent.address} (local endpoint)")
+    print(f"  Perform Action:   {perform_action_agent.address} (local endpoint)")
+    resolved_agentverse = _resolve_agentverse()
+    if resolved_agentverse:
+        print(f"  Agentverse URL:   {resolved_agentverse}")
     print("========================\n")
 
     bureau.run()
