@@ -121,6 +121,27 @@ button:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
 .healthbar-nav { flex-shrink: 0; }
 .nav-tab { white-space: nowrap; }
 
+/* Back-to-landing button inside brand area */
+.brand-back {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px; height: 26px;
+  border-radius: 5px;
+  border: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--fg-3);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  flex-shrink: 0;
+  padding: 0;
+}
+.brand-back:hover {
+  border-color: oklch(0.45 0.12 280);
+  color: oklch(0.68 0.22 275);
+  background: oklch(0.22 0.08 280 / 0.08);
+}
+
 /* thin vertical rule between brand and nav */
 .healthbar > .brand::after {
   content: "";

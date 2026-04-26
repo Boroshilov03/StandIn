@@ -177,7 +177,7 @@ function NotificationBell() {
   );
 }
 
-function HealthBar({ route, setRoute, counts }) {
+function HealthBar({ route, setRoute, counts, onBackToLanding }) {
   useEffect(() => {
     const t = setInterval(() => window.MOCK_API.healthAgents(), 8000);
     return () => clearInterval(t);
@@ -211,6 +211,14 @@ function HealthBar({ route, setRoute, counts }) {
   return (
     <header className="healthbar" data-screen-label="Top rail">
       <div className="brand">
+        <button
+          className="brand-back"
+          onClick={onBackToLanding}
+          aria-label="Back to landing page"
+          title="Back to home"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+        </button>
         <div className="brand-mark"/>
         StandIn
         <small>NovaLoop</small>
@@ -250,7 +258,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "simulateTrace": "none"
 }/*EDITMODE-END*/;
 
-export function App() {
+export function App({ onBackToLanding }) {
   const [route, setRoute] = useState('attention');
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [activeTrace, setActiveTrace] = useState(null);
@@ -305,7 +313,7 @@ export function App() {
 
   return (
     <div className="app">
-      <HealthBar route={route} setRoute={setRoute} counts={counts}/>
+      <HealthBar route={route} setRoute={setRoute} counts={counts} onBackToLanding={onBackToLanding}/>
       <div className="body">
         <main className="main" data-screen-label={`Route ${route}`}>
           {/* AttentionBoard stays mounted so async query state survives the Orchestration redirect */}

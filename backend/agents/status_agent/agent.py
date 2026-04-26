@@ -1124,6 +1124,31 @@ async def _synthesize_role(
 # Phase 3 — contradiction detection
 # ---------------------------------------------------------------------------
 
+async def _synthesize_all_roles(
+    roles: list[str],
+    raw_data: dict[str, dict],
+    workflow_id: str = "unknown",
+    trust_metas: list[dict] | None = None,
+) -> dict[str, dict | None] | None:
+    """
+    Compatibility wrapper for the current pipeline's multi-role synthesis path.
+
+    This checkout only has the per-role Gemini synthesis implementation, so run
+    those calls concurrently while preserving the expected role->result shape.
+    """
+    if not roles:
+        return {}
+    tasks = [
+        _synthesize_role(role, raw_data[role], workflow_id=workflow_id, trust_metas=trust_metas)
+        for role in roles
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    return {
+        role: (None if isinstance(result, Exception) else result)
+        for role, result in zip(roles, results)
+    }
+
+
 def _contradictions_rules(responses: list[MeetingResponse]) -> dict:
     """
     Rule engine — guaranteed to fire for the seeded scenario even without Gemini.
@@ -1459,9 +1484,24 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
     import time
     t_start = time.monotonic()
 
-    roles   = msg.roles or ALL_ROLES
+    requested_roles = msg.roles or ALL_ROLES
+    roles = []
+    unsupported_roles = []
+    for role in requested_roles:
+        if role in ROLE_CONFIGS and role not in roles:
+            roles.append(role)
+        elif role not in ROLE_CONFIGS:
+            unsupported_roles.append(role)
+    if not roles:
+        roles = ALL_ROLES
     now     = datetime.now(UTC).isoformat()
     session_id = msg.session_id or str(uuid.uuid4())
+
+    if unsupported_roles:
+        ctx.logger.warning(
+            f"Ignoring unsupported role(s) {unsupported_roles}; "
+            f"using configured roles {roles}"
+        )
 
     ctx.logger.info(
         f"Pipeline start | id={msg.request_id} | roles={roles} | "
