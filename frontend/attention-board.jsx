@@ -1,9 +1,12 @@
 // StandIn — Attention Board view.
 
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Icon, RiskBadge, StatusPill, TeamBadge, TEAM_KEY, relTime } from './primitives.jsx';
+
 const _RISK_RANK   = { high: 0, medium: 1, low: 2 };
 const _STATUS_RANK = { blocked: 0, in_review: 1, ready: 2 };
 
-function AttentionBoard({ tweaks }) {
+export function AttentionBoard({ tweaks }) {
   const [approvals, setApprovals] = useState(() => window.MOCK_API.listApprovals());
   const [resolving, setResolving] = useState({});
   const [chat, setChat] = useState(null); // { ticket, conversationId, state }
@@ -910,4 +913,3 @@ function _fmtTime(ts) {
   } catch (_) { return ''; }
 }
 
-Object.assign(window, { AttentionBoard, BriefResult, ResolutionChat });

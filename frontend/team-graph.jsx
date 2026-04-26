@@ -1,5 +1,8 @@
 // StandIn — Team Graph (force-directed). Custom mini-simulator, no external deps.
 
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Icon, TeamBadge } from './primitives.jsx';
+
 const TEAM_COLOR = {
   Engineering: 'var(--eng)',
   Design:      'var(--design)',
@@ -56,7 +59,7 @@ function InteractionGlyph({ type, color }) {
   );
 }
 
-function TeamGraph({ tweaks }) {
+export function TeamGraph({ tweaks }) {
   const [users, setUsers]       = useState(() => window.MOCK_API.listUsers());
   const [edgesAll, setEdgesAll] = useState(() => window.MOCK_API.listEdges());
 
@@ -747,4 +750,3 @@ function initials(name) {
   return name.split(' ').map(p => p[0]).join('').slice(0,2).toUpperCase();
 }
 
-Object.assign(window, { TeamGraph });

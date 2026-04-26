@@ -15,9 +15,9 @@ from services.jira_auth import get_base_url, get_jira_headers, get_project_key
 
 
 ASSIGNEES = {
-    "mirlan": "712020:4de101a8-b63e-4725-81af-8dbf66b1a484",
-    "tomiwa": "712020:3508513c-ffa5-413c-ac52-e884cd371e95",
-    "betool": "712020:ef71eea8-62f9-49e3-9f20-69cabbe510a5",
+    "Derek": "712020:4de101a8-b63e-4725-81af-8dbf66b1a484",
+    "Kai": "712020:3508513c-ffa5-413c-ac52-e884cd371e95",
+    "Sam": "712020:ef71eea8-62f9-49e3-9f20-69cabbe510a5",
    }
 
 
@@ -367,7 +367,7 @@ def run() -> None:
             "priority": "High",
             "status": "Done",
             "labels": ["auth", "critical-path", "v1"],
-            "assignee": "mirlan",
+            "assignee": "Derek",
         },
         {
             "summary": "Token expiry edge case — race condition under <30s tokens",
@@ -376,7 +376,7 @@ def run() -> None:
             "priority": "Low",
             "status": "To Do",
             "labels": ["auth", "post-launch", "tech-debt"],
-            "assignee": "mirlan",
+            "assignee": "Derek",
         },
         {
             "summary": "Remove delegate handoff UI from v1 scope",
@@ -385,7 +385,7 @@ def run() -> None:
             "priority": "Medium",
             "status": "Done",
             "labels": ["scope", "v1", "demo"],
-            "assignee": "tomiwa",
+            "assignee": "Kai",
         },
         {
             "summary": "RAG evidence pipeline smoke test",
@@ -394,7 +394,7 @@ def run() -> None:
             "priority": "High",
             "status": "Done",
             "labels": ["rag", "testing", "v1"],
-            "assignee": "tomiwa",
+            "assignee": "Kai",
         },
         {
             "summary": "Seed production MongoDB with Meridian scenario data",
@@ -403,7 +403,7 @@ def run() -> None:
             "priority": "Medium",
             "status": "Done",
             "labels": ["data", "staging", "demo"],
-            "assignee": "betool",
+            "assignee": "Sam",
         },
         {
             "summary": "Fix brief output label — wrong display on action dispatch result",
@@ -412,7 +412,7 @@ def run() -> None:
             "priority": "Low",
             "status": "Done",
             "labels": ["ui", "brief", "demo"],
-            "assignee": "betool",
+            "assignee": "Sam",
         },
         {
             "summary": "Data processing addendum (DPA) — vendor contract",
@@ -421,7 +421,7 @@ def run() -> None:
             "priority": "Medium",
             "status": "To Do",
             "labels": ["legal", "vendor", "ops"],
-            "assignee": "mirlan",
+            "assignee": "Derek",
         },
         {
             "summary": "Set up v1.1 planning cycle",
@@ -430,7 +430,7 @@ def run() -> None:
             "priority": "Low",
             "status": "To Do",
             "labels": ["planning", "v1.1"],
-            "assignee": "betool",
+            "assignee": "Sam",
         },
         {
             "summary": "Board demo script — finalize scope and flow",
@@ -439,7 +439,7 @@ def run() -> None:
             "priority": "High",
             "status": "Done",
             "labels": ["demo", "board", "v1"],
-            "assignee": "tomiwa",
+            "assignee": "Kai",
         },
         {
             "summary": "Launch comms — internal announcement and external post",
@@ -448,7 +448,7 @@ def run() -> None:
             "priority": "Medium",
             "status": "To Do",
             "labels": ["comms", "launch", "ops"],
-            "assignee": "betool",
+            "assignee": "Sam",
         },
     ]
 

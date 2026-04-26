@@ -46,7 +46,6 @@ client_secret.json
 .DS_Store
 Thumbs.db
 
-node_modules
-
+# Runtime logs
 gx10.err.log
 gx10.out.log
