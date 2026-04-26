@@ -125,9 +125,12 @@ function App() {
       <HealthBar route={route} setRoute={setRoute} counts={counts}/>
       <div className="body">
         <main className="main" data-screen-label={`Route ${route}`}>
-          {route === 'attention' && <AttentionBoard tweaks={{ activateTrace }}/>}
-          {route === 'graph'     && <TeamGraph tweaks={{ openNode, clearOpenNode: () => setOpenNode(null) }}/>}
-          {route === 'monitor'   && <OrchestrationMonitor activeTrace={activeTrace}/>}
+          {/* AttentionBoard stays mounted so async query state survives the Orchestration redirect */}
+          <div style={{ display: route === 'attention' ? 'contents' : 'none' }}>
+            <AttentionBoard tweaks={{ activateTrace, navigateToMonitor: () => setRoute('monitor'), navigateToAttention: () => setRoute('attention') }}/>
+          </div>
+          {route === 'graph'   && <TeamGraph tweaks={{ openNode, clearOpenNode: () => setOpenNode(null) }}/>}
+          {route === 'monitor' && <OrchestrationMonitor activeTrace={activeTrace}/>}
         </main>
       </div>
 

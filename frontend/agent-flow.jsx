@@ -140,25 +140,42 @@ const AF_SCENARIOS = [
   },
 ];
 
-function AgentFlowGraph({ activeTrace }) {
-  const [scIdx, setScIdx]     = useState(0);
-  const [stIdx, setStIdx]     = useState(0);
-  const [running, setRunning] = useState(true);
-  const scIdxRef = React.useRef(scIdx);
+// Maps tweaks-panel activeTrace values to AF_SCENARIOS ids
+const _ACCENT_TO_SC = { status: 'status', historical: 'history', perform: 'action' };
 
-  // Keep ref in sync so interval closure can read latest scIdx
+function AgentFlowGraph({ activeTrace }) {
+  const [scIdx, setScIdx]       = useState(0);
+  const [stIdx, setStIdx]       = useState(0);
+  const [running, setRunning]   = useState(true);
+  const [liveTrace, setLiveTrace] = useState(null);
+  const scIdxRef    = React.useRef(scIdx);
+  const liveRef     = React.useRef(null);
+
+  // Keep refs in sync
   useEffect(() => { scIdxRef.current = scIdx; }, [scIdx]);
 
-  const scenario = AF_SCENARIOS[scIdx];
-  const step     = scenario.steps[stIdx];
-  const edgeDef  = AF_EDGES.find(e => e.id === step.edge);
-  const activeNodes = new Set(step.active || []);
-  const isRev = step.dir === 'rev';
+  // Poll live trace every 250 ms
+  useEffect(() => {
+    const t = setInterval(() => {
+      const lt = window.MOCK_API.getLiveTrace ? window.MOCK_API.getLiveTrace() : null;
+      liveRef.current = lt;
+      setLiveTrace(lt ? { scenario: lt.scenario, step: lt.step } : null);
+    }, 250);
+    return () => clearInterval(t);
+  }, []);
 
-  // Auto-advance steps → scenarios
+  // When live trace fires, lock scenario + step
+  useEffect(() => {
+    if (!liveTrace) return;
+    const idx = AF_SCENARIOS.findIndex(s => s.id === liveTrace.scenario);
+    if (idx >= 0) { setScIdx(idx); setStIdx(liveTrace.step); }
+  }, [liveTrace?.scenario, liveTrace?.step]);
+
+  // Auto-advance steps → scenarios (skips when live trace is active)
   useEffect(() => {
     if (!running) return;
     const t = setInterval(() => {
+      if (liveRef.current) return;
       setStIdx(prev => {
         const sc = scIdxRef.current;
         if (prev + 1 >= AF_SCENARIOS[sc].steps.length) {
@@ -171,14 +188,23 @@ function AgentFlowGraph({ activeTrace }) {
     return () => clearInterval(t);
   }, [running]);
 
-  // Sync to activeTrace from parent tweaks panel
+  // Sync to tweaks-panel activeTrace (lower priority than live trace)
   useEffect(() => {
-    if (!activeTrace || activeTrace === 'none') return;
-    const idx = AF_SCENARIOS.findIndex(s => s.id === activeTrace);
+    if (!activeTrace || activeTrace === 'none' || liveRef.current) return;
+    const sid = _ACCENT_TO_SC[activeTrace] || activeTrace;
+    const idx = AF_SCENARIOS.findIndex(s => s.id === sid);
     if (idx >= 0) { setScIdx(idx); setStIdx(0); }
   }, [activeTrace]);
 
+  const animated = running || !!liveTrace;
+
   function selectScenario(i) { setScIdx(i); setStIdx(0); }
+
+  const scenario   = AF_SCENARIOS[scIdx];
+  const step       = scenario.steps[stIdx] || scenario.steps[0];
+  const edgeDef    = AF_EDGES.find(e => e.id === step.edge);
+  const activeNodes = new Set(step.active || []);
+  const isRev      = step.dir === 'rev';
 
   return (
     <div className="af-wrap">
@@ -205,13 +231,19 @@ function AgentFlowGraph({ activeTrace }) {
             message packet
           </span>
         </div>
+        {liveTrace
+          ? <span className="af-live-badge">● LIVE</span>
+          : running && <span className="af-idle-badge">idle · demo</span>
+        }
         <button className="btn ghost af-play-btn"
-          onClick={() => setRunning(r => !r)}>
-          {running
+          onClick={() => { if (!liveTrace) setRunning(r => !r); }}
+          disabled={!!liveTrace}
+          title={liveTrace ? 'Live request in flight' : (running ? 'Pause auto-loop' : 'Resume auto-loop')}>
+          {running || liveTrace
             ? <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="4" height="10" rx="1" fill="currentColor"/><rect x="7" y="1" width="4" height="10" rx="1" fill="currentColor"/></svg>
             : <svg width="12" height="12" viewBox="0 0 12 12"><polygon points="1,0 12,6 1,12" fill="currentColor"/></svg>
           }
-          {running ? 'Pause' : 'Play'}
+          {running || liveTrace ? 'Pause' : 'Play'}
         </button>
       </div>
 
@@ -251,26 +283,29 @@ function AgentFlowGraph({ activeTrace }) {
                 stroke={scenario.c} strokeWidth="2" opacity="0.88"
                 strokeLinecap="round"/>
 
-              {/* Trailing ring (pulses around the packet) */}
-              <circle r="5" fill="none" stroke={scenario.c} strokeWidth="1.5">
-                <animateMotion dur="1.15s" repeatCount="indefinite"
-                  keyPoints={isRev ? '1;0' : '0;1'} keyTimes="0;1" calcMode="linear">
-                  <mpath href={`#afp-${step.edge}`}/>
-                </animateMotion>
-                <animate attributeName="r" dur="1.15s" repeatCount="indefinite"
-                  values="4;16;4" keyTimes="0;0.35;1"/>
-                <animate attributeName="opacity" dur="1.15s" repeatCount="indefinite"
-                  values="0;0.55;0" keyTimes="0;0.25;1"/>
-              </circle>
-
-              {/* Main packet dot */}
-              <circle r="6" fill={scenario.c} opacity="0.95"
-                style={{ filter: `drop-shadow(0 0 7px ${scenario.c})` }}>
-                <animateMotion dur="1.15s" repeatCount="indefinite"
-                  keyPoints={isRev ? '1;0' : '0;1'} keyTimes="0;1" calcMode="linear">
-                  <mpath href={`#afp-${step.edge}`}/>
-                </animateMotion>
-              </circle>
+              {animated && (
+                <g>
+                  {/* Trailing ring */}
+                  <circle r="5" fill="none" stroke={scenario.c} strokeWidth="1.5">
+                    <animateMotion dur="1.15s" repeatCount="indefinite"
+                      keyPoints={isRev ? '1;0' : '0;1'} keyTimes="0;1" calcMode="linear">
+                      <mpath href={`#afp-${step.edge}`}/>
+                    </animateMotion>
+                    <animate attributeName="r" dur="1.15s" repeatCount="indefinite"
+                      values="4;16;4" keyTimes="0;0.35;1"/>
+                    <animate attributeName="opacity" dur="1.15s" repeatCount="indefinite"
+                      values="0;0.55;0" keyTimes="0;0.25;1"/>
+                  </circle>
+                  {/* Main packet dot */}
+                  <circle r="6" fill={scenario.c} opacity="0.95"
+                    style={{ filter: `drop-shadow(0 0 7px ${scenario.c})` }}>
+                    <animateMotion dur="1.15s" repeatCount="indefinite"
+                      keyPoints={isRev ? '1;0' : '0;1'} keyTimes="0;1" calcMode="linear">
+                      <mpath href={`#afp-${step.edge}`}/>
+                    </animateMotion>
+                  </circle>
+                </g>
+              )}
             </g>
           )}
 
@@ -328,8 +363,10 @@ function AgentFlowGraph({ activeTrace }) {
                 {isActive && (
                   <circle cx={n.cx + AF_NHW - 10} cy={n.cy - AF_NHH + 10}
                     r="3.5" fill={scenario.c} opacity="0.9">
-                    <animate attributeName="opacity" dur="1.2s" repeatCount="indefinite"
-                      values="0.9;0.3;0.9"/>
+                    {animated && (
+                      <animate attributeName="opacity" dur="1.2s" repeatCount="indefinite"
+                        values="0.9;0.3;0.9"/>
+                    )}
                   </circle>
                 )}
               </g>
