@@ -1,15 +1,13 @@
 // StandIn — shared UI primitives.
-const { useState, useEffect, useRef, useMemo, useCallback } = React;
-
-const TEAM_KEY = (t) => (t || '').toLowerCase();
-const TEAM_VAR = {
+export const TEAM_KEY = (t) => (t || '').toLowerCase();
+export const TEAM_VAR = {
   engineering: 'var(--eng)',
   design:      'var(--design)',
   gtm:         'var(--gtm)',
   product:     'var(--product)',
 };
 
-function Icon({ name, size = 16, style }) {
+export function Icon({ name, size = 16, style }) {
   const s = { width: size, height: size, ...style };
   const sw = 1.6;
   const props = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round', style: s };
@@ -33,7 +31,7 @@ function Icon({ name, size = 16, style }) {
   }
 }
 
-function TeamBadge({ team, dot = true }) {
+export function TeamBadge({ team, dot = true }) {
   const k = TEAM_KEY(team);
   return (
     <span className={`team-badge ${k}`}>
@@ -43,16 +41,16 @@ function TeamBadge({ team, dot = true }) {
   );
 }
 
-function StatusPill({ status }) {
+export function StatusPill({ status }) {
   const label = (status || '').replace('_', ' ');
   return <span className={`status-pill ${status}`}><span className="dot" /> {label}</span>;
 }
 
-function RiskBadge({ risk }) {
+export function RiskBadge({ risk }) {
   return <span className={`risk ${risk}`}>{(risk || '').toUpperCase()}</span>;
 }
 
-function relTime(iso) {
+export function relTime(iso) {
   const d = new Date(iso);
   const now = Date.now();
   const diff = (now - d.getTime()) / 1000;
@@ -62,8 +60,7 @@ function relTime(iso) {
   return d.toISOString().slice(0,10);
 }
 
-function timeOnly(iso) {
+export function timeOnly(iso) {
   return new Date(iso).toISOString().slice(11,19);
 }
 
-Object.assign(window, { Icon, TeamBadge, StatusPill, RiskBadge, relTime, timeOnly, TEAM_KEY, TEAM_VAR });

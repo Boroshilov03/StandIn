@@ -1,0 +1,7 @@
+INFO:     Started server process [42024]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+2026-04-26 02:08:03,473 [INFO] standin-gx10: redact[ae3cd03f-c024-4575-a402-771cdebabbb0] mode=deterministic elapsedMs=1
+2026-04-26 02:08:05,976 [INFO] standin-gx10: redact[ae3cd03f-c024-4575-a402-771cdebabbb0] mode=deterministic elapsedMs=1
+2026-04-26 02:08:14,911 [INFO] standin-gx10: contradiction[ae3cd03f-c024-4575-a402-771cdebabbb0] mode=deterministic elapsedMs=0

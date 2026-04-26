@@ -1,5 +1,19 @@
 // StandIn — App shell: nav, health bar, route switcher, tweaks integration.
 
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { AttentionBoard } from './attention-board.jsx';
+import { TeamGraph } from './team-graph.jsx';
+import { OrchestrationMonitor } from './orchestration.jsx';
+import {
+  TweakButton,
+  TweakRadio,
+  TweakSection,
+  TweakToggle,
+  TweaksPanel,
+  useTweaks,
+} from './tweaks-panel.jsx';
+
 const NOTIF_KIND_META = {
   'conversation.resolved': { icon: '✓', tone: 'tone-success', label: 'Resolved' },
   'meeting.created':       { icon: '📅', tone: 'tone-info',    label: 'Meeting' },
@@ -110,7 +124,7 @@ function NotificationBell() {
           </svg>
           {unread > 0 && <span className="notif-badge tabular">{unread > 99 ? '99+' : unread}</span>}
         </button>
-        {open && ReactDOM.createPortal(
+        {open && createPortal(
           <div className="notif-dropdown" role="dialog" aria-label="Notifications" ref={(el) => { if (el) el.dataset.portal = '1'; }}>
             <div className="notif-dropdown-head">
               <span className="notif-dropdown-title">Activity</span>
@@ -163,7 +177,7 @@ function NotificationBell() {
   );
 }
 
-function HealthBar({ route, setRoute, counts }) {
+function HealthBar({ route, setRoute, counts, onBackToLanding }) {
   useEffect(() => {
     const t = setInterval(() => window.MOCK_API.healthAgents(), 8000);
     return () => clearInterval(t);
@@ -197,6 +211,14 @@ function HealthBar({ route, setRoute, counts }) {
   return (
     <header className="healthbar" data-screen-label="Top rail">
       <div className="brand">
+        <button
+          className="brand-back"
+          onClick={onBackToLanding}
+          aria-label="Back to landing page"
+          title="Back to home"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
+        </button>
         <div className="brand-mark"/>
         StandIn
         <small>NovaLoop</small>
@@ -236,7 +258,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "simulateTrace": "none"
 }/*EDITMODE-END*/;
 
-function App() {
+export function App({ onBackToLanding }) {
   const [route, setRoute] = useState('attention');
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [activeTrace, setActiveTrace] = useState(null);
@@ -291,7 +313,7 @@ function App() {
 
   return (
     <div className="app">
-      <HealthBar route={route} setRoute={setRoute} counts={counts}/>
+      <HealthBar route={route} setRoute={setRoute} counts={counts} onBackToLanding={onBackToLanding}/>
       <div className="body">
         <main className="main" data-screen-label={`Route ${route}`}>
           {/* AttentionBoard stays mounted so async query state survives the Orchestration redirect */}
@@ -334,4 +356,3 @@ function App() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
