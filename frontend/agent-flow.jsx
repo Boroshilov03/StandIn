@@ -1,6 +1,8 @@
 // StandIn — Agent Flow: animated node-based orchestration observer.
 // Hardcoded scenarios — swap SCENARIOS data once live event stream is available.
 
+import React, { useEffect, useState } from 'react';
+
 const AF_NW = 144, AF_NH = 52, AF_NHW = AF_NW / 2, AF_NHH = AF_NH / 2;
 
 const AF_NODES = {
@@ -228,7 +230,7 @@ const AF_SCENARIOS = [
 // Maps tweaks-panel activeTrace values to AF_SCENARIOS ids
 const _ACCENT_TO_SC = { status: 'status', historical: 'history', perform: 'action' };
 
-function AgentFlowGraph({ activeTrace }) {
+export function AgentFlowGraph({ activeTrace }) {
   const [scIdx, setScIdx]       = useState(0);
   const [stIdx, setStIdx]       = useState(0);
   const [running, setRunning]   = useState(true);
@@ -558,4 +560,3 @@ function AgentFlowGraph({ activeTrace }) {
   );
 }
 
-Object.assign(window, { AgentFlowGraph });

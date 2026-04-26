@@ -1,5 +1,9 @@
 // StandIn — Orchestration Monitor.
 
+import { useEffect, useState } from 'react';
+import { AgentFlowGraph } from './agent-flow.jsx';
+import { StatusPill, timeOnly } from './primitives.jsx';
+
 const TRACE_ACCENTS = {
   status:     { color: 'var(--eng)',    bg: 'oklch(0.30 0.10 245)' },
   historical: { color: 'var(--design)', bg: 'oklch(0.30 0.10 305)' },
@@ -9,7 +13,7 @@ const TRACE_ACCENTS = {
 // Maps AF_SCENARIOS ids → TRACE_ACCENTS keys
 const _SC_TO_ACCENT = { status: 'status', history: 'historical', action: 'perform' };
 
-function OrchestrationMonitor({ activeTrace: propActiveTrace }) {
+export function OrchestrationMonitor({ activeTrace: propActiveTrace }) {
   const [monTab, setMonTab]   = useState('flow');
   const [feed, setFeed]       = useState(() => window.MOCK_API.listFeed());
   const [liveTrace, setLiveTrace] = useState(null);
@@ -187,4 +191,3 @@ function FeedRow({ row }) {
   );
 }
 
-Object.assign(window, { OrchestrationMonitor });

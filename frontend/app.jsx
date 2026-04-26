@@ -1,5 +1,19 @@
 // StandIn — App shell: nav, health bar, route switcher, tweaks integration.
 
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { AttentionBoard } from './attention-board.jsx';
+import { TeamGraph } from './team-graph.jsx';
+import { OrchestrationMonitor } from './orchestration.jsx';
+import {
+  TweakButton,
+  TweakRadio,
+  TweakSection,
+  TweakToggle,
+  TweaksPanel,
+  useTweaks,
+} from './tweaks-panel.jsx';
+
 const NOTIF_KIND_META = {
   'conversation.resolved': { icon: '✓', tone: 'tone-success', label: 'Resolved' },
   'meeting.created':       { icon: '📅', tone: 'tone-info',    label: 'Meeting' },
@@ -110,7 +124,7 @@ function NotificationBell() {
           </svg>
           {unread > 0 && <span className="notif-badge tabular">{unread > 99 ? '99+' : unread}</span>}
         </button>
-        {open && ReactDOM.createPortal(
+        {open && createPortal(
           <div className="notif-dropdown" role="dialog" aria-label="Notifications" ref={(el) => { if (el) el.dataset.portal = '1'; }}>
             <div className="notif-dropdown-head">
               <span className="notif-dropdown-title">Activity</span>
@@ -236,7 +250,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "simulateTrace": "none"
 }/*EDITMODE-END*/;
 
-function App() {
+export function App() {
   const [route, setRoute] = useState('attention');
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [activeTrace, setActiveTrace] = useState(null);
@@ -334,4 +348,3 @@ function App() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
