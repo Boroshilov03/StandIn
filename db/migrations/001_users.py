@@ -19,7 +19,7 @@ USERS = [
         "firstName": "Alice",
         "email": "alice@standin.ai",
         "slackDisplayName": "Alice Chen",
-        "avatarEmoji": ":grinning_cat:",
+        "avatarEmoji": ":woman:",
         "role": "Product lead",
         "team": "Product",
         "timezone": "America/Los_Angeles",

@@ -311,8 +311,9 @@ def _extract_requested_names(text: str) -> list[str]:
 
     # Common pattern: "with Derek", "with Derek and Priya", etc.
     match = re.search(
-        r"\bwith\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?(?:\s*(?:,|and)\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)*)",
+        r"\bwith\s+([A-Za-z][A-Za-z'.-]*(?:\s+[A-Za-z][A-Za-z'.-]*)?(?:\s*(?:,|and)\s*[A-Za-z][A-Za-z'.-]*(?:\s+[A-Za-z][A-Za-z'.-]*)?)*)",
         raw,
+        flags=re.IGNORECASE,
     )
     if not match:
         return []
@@ -325,9 +326,10 @@ def _extract_requested_names(text: str) -> list[str]:
         if not name:
             continue
         # Ignore trailing intent text if the regex over-captured.
-        name = re.sub(r"\s+(?:i|we)\b.*$", "", name, flags=re.IGNORECASE).strip()
+        name = re.sub(r"\s+(?:i|we|to|for)\b.*$", "", name, flags=re.IGNORECASE).strip()
         if not name:
             continue
+        name = " ".join(token.capitalize() for token in name.split())
         key = name.lower()
         if key in seen:
             continue
@@ -1192,9 +1194,10 @@ async def handle_action_response(ctx: Context, sender: str, msg: ActionResponse)
             when_text = start_dt.astimezone(tz).strftime("%B %d at %I:%M %p")
         except Exception:
             pass
-        if msg.result and "link=" in msg.result:
-            link_part = msg.result.split("link=", 1)[1].strip()
-            calendar_link = link_part.split()[0].strip()
+        if msg.result:
+            url_match = re.search(r"https?://\S+", msg.result)
+            if url_match:
+                calendar_link = url_match.group(0).rstrip(").,")
         reply_text = (
             f"I've talked to {colleague}'s agent to find a common available time. "
             f"I've scheduled a meeting for you and {colleague} on {when_text}."
