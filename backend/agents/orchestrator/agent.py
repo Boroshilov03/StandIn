@@ -102,7 +102,7 @@ ACTION_HINTS = {
     "draft_slack": ("draft slack", "slack draft"),
     "create_jira": ("jira", "ticket", "issue"),
     "update_jira_status": ("move ticket", "update jira", "transition jira", "change ticket status"),
-    "schedule_meeting": ("schedule", "meeting", "calendar", "invite"),
+    "schedule_meeting": ("schedule", "book meeting", "set up meeting", "invite"),
     "create_action_item": ("action item", "todo", "task"),
     "post_brief": ("post brief", "save brief", "publish brief"),
 }
@@ -130,6 +130,10 @@ Rules:
 - briefing_request = broad cross-team summary / executive brief
 - history_query = past decisions, previous meetings, what happened before
 - action_request = asks to send/create/update/schedule/post something
+- Calendar read requests are NOT action_request:
+  - upcoming/current meetings -> status_query
+  - past meetings/events/history -> history_query
+- Calendar create/update requests ARE action_request (typically schedule_meeting).
 - Extract teams only from explicit team mentions.
 - Keep topic short and literal.
 - time_window should only be set when clearly present.
@@ -176,6 +180,24 @@ def _extract_time_window(text: str) -> str | None:
     return match.group(0) if match else None
 
 
+def _is_calendar_read_request(text: str) -> bool:
+    lowered = text.lower()
+    calendar_terms = ("meeting", "meetings", "calendar", "event", "events")
+    read_terms = ("what", "show", "list", "read", "upcoming", "next", "have", "find")
+    write_terms = ("schedule", "book", "create", "set up", "invite", "add")
+    has_calendar = any(term in lowered for term in calendar_terms)
+    has_read = any(term in lowered for term in read_terms)
+    has_write = any(term in lowered for term in write_terms)
+    return has_calendar and has_read and not has_write
+
+
+def _is_calendar_past_query(text: str) -> bool:
+    lowered = text.lower()
+    past_terms = ("past", "previous", "last", "earlier", "history", "happened", "had")
+    calendar_terms = ("meeting", "meetings", "calendar", "event", "events")
+    return any(term in lowered for term in past_terms) and any(term in lowered for term in calendar_terms)
+
+
 def _infer_action_type(text: str) -> str | None:
     lowered = text.lower()
     for action_type, hints in ACTION_HINTS.items():
@@ -214,6 +236,12 @@ def _infer_action_payload(text: str, action_type: str | None) -> dict:
         payload["start_time"] = _extract_time_window(text) or ""
         payload["duration_minutes"] = 30
         payload["description"] = text
+    elif action_type == "read_calendar_events":
+        payload["max_results"] = 10
+        payload["query"] = ""
+        payload["time_min"] = ""
+        payload["time_max"] = ""
+        payload["description"] = text
     elif action_type == "create_action_item":
         payload["description"] = text
         payload["owner"] = "unassigned"
@@ -230,7 +258,14 @@ def _fallback_classification(text: str) -> IntentClassification:
     time_window = _extract_time_window(text)
     action_type = _infer_action_type(text)
 
-    if action_type:
+    if _is_calendar_read_request(text):
+        action_type = None
+
+    if _is_calendar_past_query(text):
+        intent = "history_query"
+    elif _is_calendar_read_request(text):
+        intent = "status_query"
+    elif action_type:
         intent = "action_request"
     elif any(token in lowered for token in ("history", "previous", "earlier", "before", "decided", "past")):
         intent = "history_query"
@@ -292,6 +327,18 @@ async def _classify(text: str) -> IntentClassification:
     except Exception as exc:
         _LOGGER.warning(f"Gemini classification failed, using fallback: {exc}")
         return _fallback_classification(text)
+
+
+def _enforce_calendar_routing(text: str, cls: IntentClassification) -> IntentClassification:
+    if _is_calendar_past_query(text):
+        cls.intent = "history_query"
+        cls.action_type = None
+        cls.action_payload_json = None
+    elif _is_calendar_read_request(text):
+        cls.intent = "status_query"
+        cls.action_type = None
+        cls.action_payload_json = None
+    return cls
 
 
 def _briefing_roles(classification: IntentClassification) -> list[str] | None:
@@ -384,7 +431,7 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
         await _send_chat_reply(ctx, sender, "I did not receive any text to route.")
         return
 
-    classification = await _classify(user_text)
+    classification = _enforce_calendar_routing(user_text, await _classify(user_text))
     request_id = str(uuid.uuid4())
 
     pending_requests[request_id] = {

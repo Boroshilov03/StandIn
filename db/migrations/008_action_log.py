@@ -27,4 +27,12 @@ def migrate(db) -> int:
         [("action_type", ASCENDING), ("payload.user_id", ASCENDING), ("created_at", DESCENDING)],
         name="idx_action_type_user_created_at",
     )
-    return 4
+    coll.create_index(
+        [("action_type", ASCENDING), ("payload.event_id", ASCENDING), ("created_at", DESCENDING)],
+        name="idx_action_type_event_created_at",
+    )
+    coll.create_index(
+        [("action_type", ASCENDING), ("payload.calendar_event_id", ASCENDING), ("created_at", DESCENDING)],
+        name="idx_action_type_calendar_event_created_at",
+    )
+    return 6

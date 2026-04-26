@@ -1,110 +1,43 @@
-import os
-from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from pymongo import MongoClient
-
-
-ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT / ".env")
-
-CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
-
-
-def _get_db():
-    mongodb_uri = os.getenv("MONGODB_URI", "")
-    if not mongodb_uri:
-        raise RuntimeError("MONGODB_URI is not set.")
-    client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=4000)
-    return client["standin"]
-
-
-def _refresh_token_key(user_id: str) -> str:
-    return f"USER_{user_id.replace('.', '_').replace('-', '_').upper()}_REFRESH_TOKEN"
-
-
-def _calendar_client_for_user(user_id: str):
-    client_id = os.getenv("GOOGLE_CLIENT_ID", "")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
-    refresh_token = os.getenv(_refresh_token_key(user_id), "")
-    if not client_id or not client_secret:
-        raise RuntimeError("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set.")
-    if not refresh_token:
-        raise RuntimeError(f"Missing refresh token env var for user '{user_id}'.")
-
-    creds = Credentials(
-        None,
-        refresh_token=refresh_token,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=client_id,
-        client_secret=client_secret,
-        scopes=[CALENDAR_SCOPE],
-    )
-    return build("calendar", "v3", credentials=creds, cache_discovery=False)
+from services.calendar_service import add_reminder, create_event
 
 
 def createEvent(userId: str, eventDetails: dict[str, Any]) -> dict:
     """
-    Creates an event on behalf of userId and optionally stores returned id to meetings.
-    eventDetails supports:
-      - summary, description
-      - start: {dateTime, timeZone}
-      - end: {dateTime, timeZone}
-      - attendees: [{email}]
-      - calendarId (optional override)
-      - meetingId (optional, for writing calendarEventId back to Mongo meetings)
+    Backward-compatible wrapper around services.calendar_service.create_event().
     """
-    db = _get_db()
-    user = db["users"].find_one({"_id": userId}, {"_id": 0, "calendarId": 1})
-    if not user:
-        raise ValueError(f"User '{userId}' not found.")
+    _ = userId  # Single-account calendar integration keeps one authenticated account.
+    timezone = (
+        eventDetails.get("timezone")
+        or eventDetails.get("start", {}).get("timeZone")
+        or eventDetails.get("end", {}).get("timeZone")
+        or "UTC"
+    )
+    attendees = eventDetails.get("attendees", [])
+    attendee_emails = [
+        attendee["email"] if isinstance(attendee, dict) else str(attendee)
+        for attendee in attendees
+    ]
 
-    service = _calendar_client_for_user(userId)
-    calendar_id = eventDetails.get("calendarId") or user["calendarId"]
-    body = {
+    details = {
         "summary": eventDetails["summary"],
         "description": eventDetails.get("description", ""),
-        "start": eventDetails["start"],
-        "end": eventDetails["end"],
-        "attendees": eventDetails.get("attendees", []),
+        "start": eventDetails["start"]["dateTime"],
+        "end": eventDetails["end"]["dateTime"],
+        "timezone": timezone,
+        "attendees": attendee_emails,
     }
-
-    created = service.events().insert(calendarId=calendar_id, body=body).execute()
-
-    meeting_id = eventDetails.get("meetingId")
-    if meeting_id:
-        db["meetings"].update_one(
-            {"meetingId": meeting_id},
-            {
-                "$set": {
-                    "calendarEventId": created.get("id"),
-                    "calendarOwnerUserId": userId,
-                    "calendarId": calendar_id,
-                }
-            },
-        )
-    return created
+    return create_event(details)
 
 
 def updateEvent(userId: str, calendarEventId: str, updates: dict[str, Any]) -> dict:
     """
-    Patches an existing event using partial Calendar event body.
+    Backward-compatible wrapper around services.calendar_service.add_reminder().
+    Supports reminder-only patches.
     """
-    db = _get_db()
-    user = db["users"].find_one({"_id": userId}, {"_id": 0, "calendarId": 1})
-    if not user:
-        raise ValueError(f"User '{userId}' not found.")
-
-    service = _calendar_client_for_user(userId)
-    updated = service.events().patch(
-        calendarId=user["calendarId"], eventId=calendarEventId, body=updates
-    ).execute()
-
-    db["meetings"].update_many(
-        {"calendarEventId": calendarEventId},
-        {"$set": {"lastCalendarSyncBy": userId}},
-    )
-    return updated
+    _ = userId
+    reminders = updates.get("reminders", {}).get("overrides")
+    if reminders is None:
+        raise ValueError("updateEvent only supports reminder overrides in this adapter.")
+    return add_reminder(calendarEventId, reminders)

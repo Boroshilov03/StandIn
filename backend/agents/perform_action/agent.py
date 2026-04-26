@@ -23,7 +23,7 @@ import logging
 import os
 import sys
 import uuid
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -53,10 +53,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 try:
-    from services.calendarService import createEvent
+    from services.calendar_service import create_event
+    from services.calendar_service import add_reminder as add_calendar_reminder
+    from services.calendar_service import get_event as get_calendar_event
+    from services.calendar_service import list_events as list_calendar_events
     from services.slackService import postAsUser
 except Exception:
-    createEvent = None
+    create_event = None
+    add_calendar_reminder = None
+    get_calendar_event = None
+    list_calendar_events = None
     postAsUser = None
 
 # ---------------------------------------------------------------------------
@@ -286,30 +292,115 @@ async def _action_schedule_meeting(action_id: str, payload: dict, priority: str)
 
     payload: { title: str, attendees: list[str], start_time: str, duration_minutes: int, description?: str }
     """
-    if createEvent is None:
+    if create_event is None:
         result = "Calendar service unavailable (missing dependencies or import path)."
         return False, result, True
     try:
-        owner_user_id = payload.get("owner_user_id", "alice.chen")
+        start_time = payload.get("start_time")
+        end_time = payload.get("end_time")
+        duration_minutes = int(payload.get("duration_minutes") or 0)
+        if start_time and not end_time and duration_minutes > 0:
+            start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+            end_time = (start_dt + timedelta(minutes=duration_minutes)).isoformat()
+
         event_details = {
-            "meetingId": payload.get("meeting_id"),
             "summary": payload.get("title", "Meeting"),
             "description": payload.get("description", ""),
-            "start": {
-                "dateTime": payload.get("start_time"),
-                "timeZone": payload.get("time_zone", "America/Los_Angeles"),
-            },
-            "end": {
-                "dateTime": payload.get("end_time"),
-                "timeZone": payload.get("time_zone", "America/Los_Angeles"),
-            },
-            "attendees": [{"email": email} for email in payload.get("attendees", [])],
+            "start": start_time,
+            "end": end_time,
+            "timezone": payload.get("time_zone", "UTC"),
+            "attendees": payload.get("attendees", []),
+            "reminders": payload.get("reminders", []),
         }
-        created = createEvent(owner_user_id, event_details)
+        if not event_details["start"] or not event_details["end"]:
+            return False, "schedule_meeting requires start_time and end_time (or duration_minutes).", False
+
+        created = create_event(event_details)
+        payload["calendar_event_id"] = created.get("id")
+        payload["calendar_html_link"] = created.get("htmlLink")
         result = f"Calendar event created. eventId={created.get('id')}"
         return True, result, False
     except Exception as exc:
         return False, f"Calendar scheduling failed: {exc}", False
+
+
+async def _action_add_calendar_reminder(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
+    """
+    Adds or updates reminders on an existing Google Calendar event.
+
+    payload: { event_id: str, reminders: list[dict] }
+    """
+    _ = action_id
+    _ = priority
+    if add_calendar_reminder is None:
+        result = "Calendar service unavailable (missing dependencies or import path)."
+        return False, result, True
+
+    event_id = (payload.get("event_id") or "").strip()
+    reminders = payload.get("reminders", [])
+    if not event_id:
+        return False, "add_calendar_reminder requires payload.event_id", False
+    if not isinstance(reminders, list) or not reminders:
+        return False, "add_calendar_reminder requires a non-empty payload.reminders list", False
+
+    try:
+        updated = add_calendar_reminder(event_id, reminders)
+        payload["calendar_event_id"] = updated.get("id", event_id)
+        payload["calendar_html_link"] = updated.get("htmlLink")
+        result = f"Calendar reminders updated. eventId={event_id}"
+        return True, result, False
+    except Exception as exc:
+        return False, f"Calendar reminder update failed: {exc}", False
+
+
+def _compact_calendar_event(event: dict) -> dict:
+    return {
+        "id": event.get("id", ""),
+        "summary": event.get("summary", ""),
+        "description": event.get("description", ""),
+        "start": event.get("start", {}),
+        "end": event.get("end", {}),
+        "attendees": event.get("attendees", []),
+        "htmlLink": event.get("htmlLink", ""),
+        "status": event.get("status", ""),
+    }
+
+
+async def _action_read_calendar_events(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
+    """
+    Read Google Calendar events.
+
+    payload:
+    - list mode: { time_min?: str, time_max?: str, max_results?: int, query?: str }
+    - single mode: { event_id: str }
+    """
+    _ = action_id
+    _ = priority
+    if list_calendar_events is None or get_calendar_event is None:
+        result = "Calendar service unavailable (missing dependencies or import path)."
+        return False, result, True
+
+    try:
+        event_id = (payload.get("event_id") or "").strip()
+        if event_id:
+            event = get_calendar_event(event_id)
+            payload["event"] = _compact_calendar_event(event)
+            result = json.dumps({"mode": "single", "event": payload["event"]})
+            return True, result, False
+
+        events = list_calendar_events(
+            time_min=payload.get("time_min") or payload.get("timeMin"),
+            time_max=payload.get("time_max") or payload.get("timeMax"),
+            max_results=int(payload.get("max_results", 10)),
+            query=payload.get("query"),
+        )
+        compact_events = [_compact_calendar_event(event) for event in events]
+        payload["events"] = compact_events
+        payload["event_count"] = len(compact_events)
+        result = json.dumps({"mode": "list", "count": len(compact_events), "events": compact_events})
+        return True, result, False
+    except Exception as exc:
+        return False, f"Calendar read failed: {exc}", False
 
 
 async def _action_create_action_item(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
@@ -382,6 +473,9 @@ _ACTIONS: dict[str, object] = {
     "create_jira":         _action_create_jira,
     "update_jira_status":  _action_update_jira_status,
     "schedule_meeting":    _action_schedule_meeting,
+    "add_calendar_reminder": _action_add_calendar_reminder,
+    "read_calendar_events": _action_read_calendar_events,
+    "read_calendar_event": _action_read_calendar_events,
     "create_action_item":  _action_create_action_item,
     "post_brief":          _action_post_brief,
 }
