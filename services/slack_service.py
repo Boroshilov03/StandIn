@@ -65,7 +65,7 @@ def resolve_slack_channel_for_post(db, channel: str | None) -> str:
     )
 
 
-def postAsUser(user_id: str, text: str, channel: str | None = None) -> dict:
+def post_as_user(user_id: str, text: str, channel: str | None = None) -> dict:
     """
     Write-only Slack post for Perform Action.
     Uses chat.postMessage with username/icon_emoji from Mongo users.
@@ -107,3 +107,8 @@ def postAsUser(user_id: str, text: str, channel: str | None = None) -> dict:
     if not result.get("ok"):
         raise RuntimeError(f"Slack API error: {result.get('error', 'unknown_error')}")
     return result
+
+
+# Backward-compatible alias for existing callers.
+def postAsUser(user_id: str, text: str, channel: str | None = None) -> dict:
+    return post_as_user(user_id=user_id, text=text, channel=channel)
