@@ -17,7 +17,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
-from data_engineering.company_data import CALENDAR, JIRA, SLACK, USERS
 from models import RAGRequest, RAGResponse
 try:
     from services.calendar_service import list_events as list_calendar_events
@@ -321,10 +320,79 @@ async def _synthesize(
 # ---------------------------------------------------------------------------
 
 def _build_seed_cache() -> list[dict]:
-    """Load all 25 documents — seed JSON files + Slack + Jira + Calendar."""
+    """Load Tier-2 keyword corpus from MongoDB collections (fallback: seed JSON)."""
     docs: list[dict] = []
 
-    # 12 seed JSON files
+    if _MONGODB_URI:
+        try:
+            from pymongo import MongoClient  # type: ignore[import-not-found]
+
+            client = MongoClient(_MONGODB_URI, serverSelectionTimeoutMS=4000)
+            db = client["standin"]
+
+            users = {
+                u.get("_id"): u
+                for u in db["users"].find({"_id": {"$ne": "standin_bot"}}, {"_id": 1, "name": 1, "team": 1})
+            }
+            channels = {
+                c.get("channelId"): c.get("name", c.get("channelId", ""))
+                for c in db["slack_channels"].find({}, {"channelId": 1, "name": 1})
+            }
+
+            for msg in db["slack_messages"].find({}, {"_id": 1, "channelId": 1, "userId": 1, "displayName": 1, "text": 1}):
+                uid = msg.get("userId", "")
+                team = users.get(uid, {}).get("team", "")
+                channel_name = channels.get(msg.get("channelId"), msg.get("channelId", ""))
+                docs.append({
+                    "id": str(msg.get("_id", "")),
+                    "title": f"Slack {channel_name} — {msg.get('displayName', uid)}",
+                    "type": "slack_message",
+                    "role": team,
+                    "tags": ["slack", channel_name.lstrip("#")],
+                    "content": msg.get("text", ""),
+                })
+
+            for ticket in db["jira_tickets"].find({}, {"issueKey": 1, "summary": 1, "status": 1, "priority": 1, "labels": 1, "assignee": 1, "description": 1}):
+                assignee = ticket.get("assignee", "")
+                role = users.get(assignee, {}).get("team", "")
+                issue_key = ticket.get("issueKey", "")
+                summary = ticket.get("summary", issue_key)
+                docs.append({
+                    "id": issue_key,
+                    "title": f"[{issue_key}] {summary}",
+                    "type": "jira_ticket",
+                    "role": role,
+                    "tags": (ticket.get("labels", []) or []) + ["jira"],
+                    "content": (
+                        f"Title: {summary}\n"
+                        f"Status: {ticket.get('status', '')}\n"
+                        f"Priority: {ticket.get('priority', '')}\n"
+                        f"Assignee: {assignee or 'unassigned'}\n"
+                        f"Description: {ticket.get('description', '')}"
+                    ),
+                })
+
+            for meeting in db["meetings"].find({}, {"meetingId": 1, "title": 1, "startTime": 1, "attendees": 1, "agenda": 1}):
+                docs.append({
+                    "id": meeting.get("meetingId", ""),
+                    "title": meeting.get("title", meeting.get("meetingId", "")),
+                    "type": "calendar_event",
+                    "role": "",
+                    "tags": ["calendar", "meeting"],
+                    "content": (
+                        f"Title: {meeting.get('title', '')}\n"
+                        f"Date: {meeting.get('startTime', '')}\n"
+                        f"Attendees: {', '.join(meeting.get('attendees', []))}\n"
+                        f"Agenda: {meeting.get('agenda', '')}"
+                    ),
+                })
+            client.close()
+            if docs:
+                return docs
+        except Exception as exc:
+            _LOGGER.warning(f"Tier-2 Mongo load failed: {exc}")
+
+    # Last fallback keeps agent usable without Mongo.
     seed_dir = os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "..", "data_engineering", "seed")
     )
@@ -334,67 +402,6 @@ def _build_seed_cache() -> list[dict]:
                 docs.append(json.load(f))
         except Exception:
             pass
-
-    # Slack messages
-    for msg in SLACK.values():
-        thread_text = "\n".join(
-            f"{t['sender']}: {t['content']}" for t in msg.get("thread", [])
-        )
-        content = msg["content"] + ("\n\nThread:\n" + thread_text if thread_text else "")
-        docs.append({
-            "id":      msg["id"],
-            "title":   f"Slack #{msg['channel']} — {msg['sender_name']}",
-            "type":    "slack_message",
-            "role":    msg.get("role", ""),
-            "tags":    ["slack", msg["channel"].lstrip("#")],
-            "content": content,
-        })
-
-    # Jira tickets — role derived from assignee's team, fallback to label scan
-    _label_role_map = {"design": "Design", "gtm": "GTM", "marketing": "GTM",
-                       "legal": "GTM", "engineering": "Engineering", "backend": "Engineering",
-                       "api": "Engineering", "qa": "Engineering"}
-    for ticket in JIRA.values():
-        assignee = ticket.get("assignee", "")
-        role = USERS.get(assignee, {}).get("team", "")
-        if not role:
-            for label in ticket.get("labels", []):
-                role = _label_role_map.get(label.lower(), "")
-                if role:
-                    break
-        docs.append({
-            "id":      ticket["id"],
-            "title":   f"[{ticket['id']}] {ticket['title']}",
-            "type":    "jira_ticket",
-            "role":    role,
-            "tags":    ticket.get("labels", []) + ["jira"],
-            "content": (
-                f"Title: {ticket['title']}\n"
-                f"Status: {ticket['status']}\n"
-                f"Priority: {ticket['priority']}\n"
-                f"Assignee: {ticket.get('assignee', 'unassigned')}\n"
-                f"Description: {ticket.get('description', '')}\n"
-                f"Labels: {', '.join(ticket.get('labels', []))}"
-            ),
-        })
-
-    # Calendar events
-    for meeting in CALENDAR.values():
-        docs.append({
-            "id":      meeting["id"],
-            "title":   meeting["title"],
-            "type":    "calendar_event",
-            "role":    "",
-            "tags":    ["calendar", "meeting"],
-            "content": (
-                f"Title: {meeting['title']}\n"
-                f"Date: {meeting['date']} {meeting['time']}\n"
-                f"Attendees: {', '.join(meeting.get('attendees', []))}\n"
-                f"Agenda: {'; '.join(meeting.get('agenda', []))}\n"
-                f"Description: {meeting.get('description', '')}"
-            ),
-        })
-
     return docs
 
 

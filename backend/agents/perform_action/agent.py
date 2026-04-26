@@ -109,10 +109,8 @@ def _get_db():
     return db
 
 
-# Actions that require human approval before execution.
-# draft_slack, create_jira, update_jira_status, create_action_item, post_brief
-# are considered low-risk and execute immediately.
-_APPROVAL_REQUIRED = {"send_email", "send_slack", "schedule_meeting"}
+# Approval gating disabled: all actions execute immediately.
+_APPROVAL_REQUIRED: set[str] = set()
 
 
 def _save_pending_approval(
@@ -309,6 +307,12 @@ async def _action_create_jira(action_id: str, payload: dict, priority: str) -> t
     }
 
     try:
+        _LOGGER.info(
+            f"create_jira starting | action_id={action_id} | "
+            f"summary='{details['summary'][:80]}' | issuetype={details['issuetype']} | "
+            f"priority={details['priority']} | labels={details['labels']} | "
+            f"sprint='{details['sprint_name']}'"
+        )
         created = create_jira_ticket(details)
         payload["jira_issue_key"] = created.get("issueKey", "")
         payload["jira_url"] = created.get("url", "")
@@ -318,9 +322,15 @@ async def _action_create_jira(action_id: str, payload: dict, priority: str) -> t
         if created.get("sprintWarning"):
             warnings.append(f"sprint: {created['sprintWarning']}")
         suffix = f" | warnings: {'; '.join(warnings)}" if warnings else ""
+        _LOGGER.info(
+            f"create_jira done | action_id={action_id} | "
+            f"issueKey={payload['jira_issue_key']} | url={payload['jira_url']} | "
+            f"warnings={warnings or 'none'}"
+        )
         result = f"Jira ticket created: {payload['jira_issue_key']} ({payload['jira_url']}){suffix}"
         return True, result, False
     except Exception as exc:
+        _LOGGER.warning(f"create_jira failed | action_id={action_id} | error={exc}")
         return False, f"Jira create failed: {exc}", False
 
 
@@ -343,8 +353,7 @@ async def _action_update_jira_status(action_id: str, payload: dict, priority: st
 
 async def _action_schedule_meeting(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
     """
-    STUB — mcp__claude_ai_Google_Calendar
-    Connect: call calendar.events.insert with attendees/time/duration.
+    Live calendar event creation via services.calendar_service.create_event.
 
     payload: { title: str, attendees: list[str], start_time: str, duration_minutes: int, description?: str }
     """
@@ -376,12 +385,27 @@ async def _action_schedule_meeting(action_id: str, payload: dict, priority: str)
         if not event_details["start"] or not event_details["end"]:
             return False, "schedule_meeting requires start_time and end_time (or duration_minutes).", False
 
+        _LOGGER.info(
+            f"schedule_meeting starting | action_id={action_id} | "
+            f"title='{event_details['summary']}' | start={event_details['start']} | "
+            f"end={event_details['end']} | tz={event_details['timezone']} | "
+            f"attendees={event_details['attendees']}"
+        )
         created = create_event(event_details)
         payload["calendar_event_id"] = created.get("id")
         payload["calendar_html_link"] = created.get("htmlLink")
-        result = f"Calendar event created. eventId={created.get('id')}"
+        _LOGGER.info(
+            f"schedule_meeting done | action_id={action_id} | "
+            f"eventId={created.get('id')} | htmlLink={created.get('htmlLink')} | "
+            f"status={created.get('status')}"
+        )
+        result = (
+            f"Calendar event created. eventId={created.get('id')} "
+            f"link={created.get('htmlLink', '')}"
+        )
         return True, result, False
     except Exception as exc:
+        _LOGGER.warning(f"schedule_meeting failed | action_id={action_id} | error={exc}")
         return False, f"Calendar scheduling failed: {exc}", False
 
 
@@ -550,20 +574,19 @@ _ACTIONS: dict[str, object] = {
 async def on_startup(ctx: Context):
     mongo_ok = bool(_MONGODB_URI)
     live_actions    = ["create_action_item", "post_brief"] if mongo_ok else []
-    gated_actions   = list(_APPROVAL_REQUIRED) if mongo_ok else []
-    stub_actions    = [k for k in _ACTIONS if k not in live_actions and k not in gated_actions]
+    stub_actions    = [k for k in _ACTIONS if k not in live_actions]
     ctx.logger.info(
         f"Perform Action online | address={ctx.agent.address} | port={_PORT}"
     )
     ctx.logger.info(
         f"MongoDB: {'connected' if mongo_ok else 'not configured'} | "
         f"Live: {live_actions or 'none'} | "
-        f"Approval-gated: {gated_actions or 'none (no MongoDB)'} | "
+        f"Approval-gated: none (disabled) | "
         f"Stubs: {stub_actions}"
     )
     if not mongo_ok:
         ctx.logger.warning(
-            "MONGODB_URI not set — approval gate, action logging, and live actions "
+            "MONGODB_URI not set — action logging and live actions "
             "(create_action_item, post_brief) are DISABLED. All actions return stubs."
         )
 
@@ -646,37 +669,6 @@ async def _handle_action_inner(ctx: Context, sender: str, msg: ActionRequest):
             success=False,
             action_id=action_id,
             error=validation_error or "Invalid payload.",
-            stub=False,
-        )
-        await ctx.send(sender, response)
-        return
-
-    # ── Approval gate ──────────────────────────────────────────────────────
-    if msg.action_type in _APPROVAL_REQUIRED and _MONGODB_URI:
-        _save_pending_approval(
-            action_id, msg.action_type, normalized_payload, priority,
-            requested_by=sender,
-            title=msg.title or "",
-            summary=msg.summary or msg.context or "",
-            team=msg.team or "",
-            owner=msg.owner or "",
-            owner_name=msg.owner_name or "",
-            ticket_status=msg.ticket_status or "in_review",
-            risk=msg.risk or "medium",
-            stub=True,
-        )
-        ctx.logger.info(
-            f"Action queued for approval | type={msg.action_type} | id={action_id}"
-        )
-        response = ActionResponse(
-            request_id=msg.request_id,
-            action_type=msg.action_type,
-            success=True,
-            action_id=action_id,
-            result=(
-                f"pending_approval — human must approve before this action executes. "
-                f"Call POST /approvals/approve with action_id={action_id}"
-            ),
             stub=False,
         )
         await ctx.send(sender, response)

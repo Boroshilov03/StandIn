@@ -15,7 +15,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
-from data_engineering.company_data import CALENDAR, JIRA, SLACK, USERS
 from models import (
     Claim,
     EvidencePassport,
@@ -70,6 +69,10 @@ agent = Agent(
 
 _STALE_HOURS = 48  # claims sourced from docs older than this are flagged stale
 _RAG_DOCS: list[dict] = []   # seed doc corpus loaded at startup
+USERS: dict[str, dict] = {}
+SLACK: dict[str, dict] = {}
+JIRA: dict[str, dict] = {}
+CALENDAR: dict[str, dict] = {}
 
 # Gemini client — created once to reuse TCP/TLS connection across all calls
 _GEMINI_CLIENT = None
@@ -100,12 +103,156 @@ def _gemini_runtime_ready() -> tuple[bool, str]:
         return False, f"google.genai unavailable ({exc})"
     return True, "ok"
 
-_TEAM_USERS: dict[str, set[str]] = {
-    team: {k for k, v in USERS.items() if v["team"] == team}
-    for team in ("Engineering", "Design", "GTM", "Product")
-}
+def _team_users_map() -> dict[str, set[str]]:
+    teams = ("Engineering", "Design", "GTM", "Product", "QA", "Operations")
+    return {
+        team: {k for k, v in USERS.items() if v.get("team") == team}
+        for team in teams
+    }
 
-ALL_ROLES = ["Engineering", "Design", "GTM", "Product"]
+
+def _load_runtime_datasets() -> tuple[str, dict[str, set[str]]]:
+    """
+    Load users/slack/jira/meetings from MongoDB collections.
+    Falls back to migration constants when MongoDB is unavailable.
+    Returns (source_label, team_users_map).
+    """
+    global USERS, SLACK, JIRA, CALENDAR
+
+    if _MONGODB_URI:
+        try:
+            from pymongo import MongoClient  # type: ignore[import-not-found]
+
+            client = MongoClient(_MONGODB_URI, serverSelectionTimeoutMS=4000)
+            db = client["standin"]
+
+            user_docs = list(db["users"].find({"_id": {"$ne": "standin_bot"}}, {"_id": 1, "name": 1, "firstName": 1, "email": 1, "role": 1, "team": 1}))
+            USERS = {
+                u["_id"]: {
+                    "id": u["_id"],
+                    "name": u.get("name", u["_id"]),
+                    "first_name": u.get("firstName") or (u.get("name", u["_id"]).split()[0]),
+                    "email": u.get("email", ""),
+                    "role": u.get("role", ""),
+                    "team": u.get("team", ""),
+                }
+                for u in user_docs if u.get("_id")
+            }
+
+            channel_docs = list(db["slack_channels"].find({}, {"channelId": 1, "name": 1}))
+            channel_name_by_id = {c.get("channelId", ""): c.get("name", c.get("channelId", "")) for c in channel_docs}
+
+            slack_docs = list(db["slack_messages"].find({}, {"_id": 1, "channelId": 1, "userId": 1, "displayName": 1, "text": 1, "timestamp": 1}))
+            slack_data: dict[str, dict] = {}
+            for m in slack_docs:
+                mid = str(m.get("_id") or m.get("messageKey") or "")
+                if not mid:
+                    continue
+                user_id = m.get("userId", "")
+                team = USERS.get(user_id, {}).get("team", "")
+                ts_val = m.get("timestamp")
+                if isinstance(ts_val, (int, float)):
+                    ts = datetime.fromtimestamp(float(ts_val) / 1000, UTC).isoformat()
+                else:
+                    ts = ""
+                channel_id = m.get("channelId", "")
+                slack_data[mid] = {
+                    "id": mid,
+                    "channel": channel_name_by_id.get(channel_id, channel_id),
+                    "sender_name": m.get("displayName", user_id),
+                    "sender": user_id,
+                    "content": m.get("text", ""),
+                    "role": team,
+                    "timestamp": ts,
+                }
+            SLACK = slack_data
+
+            jira_docs = list(db["jira_tickets"].find({}, {"issueKey": 1, "summary": 1, "description": 1, "status": 1, "priority": 1, "labels": 1, "assignee": 1, "createdAt": 1, "updatedAt": 1}))
+            JIRA = {
+                t["issueKey"]: {
+                    "id": t["issueKey"],
+                    "title": t.get("summary", t["issueKey"]),
+                    "description": t.get("description", ""),
+                    "status": t.get("status", ""),
+                    "priority": t.get("priority", ""),
+                    "labels": t.get("labels", []),
+                    "assignee": t.get("assignee", ""),
+                    "created": t.get("createdAt", ""),
+                    "updated": t.get("updatedAt", ""),
+                }
+                for t in jira_docs if t.get("issueKey")
+            }
+
+            meeting_docs = list(db["meetings"].find({}, {"meetingId": 1, "title": 1, "attendees": 1, "agenda": 1, "startTime": 1, "timezone": 1}))
+            CALENDAR = {
+                m["meetingId"]: {
+                    "id": m["meetingId"],
+                    "title": m.get("title", m["meetingId"]),
+                    "attendees": m.get("attendees", []),
+                    "agenda": [m.get("agenda", "")] if isinstance(m.get("agenda", ""), str) else (m.get("agenda") or []),
+                    "date": str(m.get("startTime", "")).split("T")[0] if m.get("startTime") else "",
+                    "time": str(m.get("startTime", "")).split("T")[1][:5] if "T" in str(m.get("startTime", "")) else "",
+                    "timezone": m.get("timezone", ""),
+                }
+                for m in meeting_docs if m.get("meetingId")
+            }
+            client.close()
+            return (
+                f"mongodb users={len(USERS)} slack={len(SLACK)} jira={len(JIRA)} meetings={len(CALENDAR)}",
+                _team_users_map(),
+            )
+        except Exception as exc:
+            _LOGGER.warning(f"Dataset load from MongoDB failed: {exc}")
+
+    # Fallback to migration constants when Mongo is unavailable.
+    try:
+        import importlib
+
+        users_mod = importlib.import_module("db.migrations.001_users")
+        jira_mod = importlib.import_module("db.migrations.010_jira_tickets")
+        mtg_mod = importlib.import_module("db.migrations.011_meetings")
+
+        USERS = {
+            u["_id"]: {
+                "id": u["_id"],
+                "name": u.get("name", u["_id"]),
+                "first_name": u.get("firstName") or (u.get("name", u["_id"]).split()[0]),
+                "email": u.get("email", ""),
+                "role": u.get("role", ""),
+                "team": u.get("team", ""),
+            }
+            for u in getattr(users_mod, "USERS", [])
+        }
+        SLACK = {}
+        # 007 has inline messages inside migrate(); we keep Slack fallback empty
+        # when MongoDB is unavailable and rely on live Slack API or Jira/docs.
+        JIRA = {t["issueKey"]: {
+            "id": t["issueKey"], "title": t.get("summary", ""),
+            "description": t.get("description", ""), "status": t.get("status", ""),
+            "priority": t.get("priority", ""), "labels": t.get("labels", []),
+            "assignee": t.get("assignee", ""), "created": t.get("createdAt", ""), "updated": t.get("updatedAt", ""),
+        } for t in getattr(jira_mod, "JIRA_TICKETS", [])}
+        CALENDAR = {m["meetingId"]: {
+            "id": m["meetingId"], "title": m.get("title", m["meetingId"]), "attendees": m.get("attendees", []),
+            "agenda": [m.get("agenda", "")] if isinstance(m.get("agenda", ""), str) else (m.get("agenda") or []),
+            "date": str(m.get("startTime", "")).split("T")[0] if m.get("startTime") else "",
+            "time": str(m.get("startTime", "")).split("T")[1][:5] if "T" in str(m.get("startTime", "")) else "",
+            "timezone": m.get("timezone", ""),
+        } for m in getattr(mtg_mod, "MEETINGS", [])}
+
+        return (
+            f"migration-fallback users={len(USERS)} slack={len(SLACK)} jira={len(JIRA)} meetings={len(CALENDAR)}",
+            _team_users_map(),
+        )
+    except Exception as exc:
+        _LOGGER.warning(f"Dataset load fallback failed: {exc}")
+        USERS = {}
+        SLACK = {}
+        JIRA = {}
+        CALENDAR = {}
+        return ("empty", {})
+
+ALL_ROLES = ["Engineering", "Design", "QA", "GTM", "Operations", "Product"]
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +289,26 @@ ROLE_CONFIGS: dict[str, dict] = {
         ),
         "default_risk": "medium",
     },
+    "QA": {
+        "team": "QA",
+        "slack_queries": ["qa", "test", "regression", "flaky", "verification"],
+        "jira_query": "qa regression test blocker",
+        "lens": (
+            "Quality-focused. Surface regression status, test blockers, "
+            "and confidence in release readiness."
+        ),
+        "default_risk": "medium",
+    },
+    "Operations": {
+        "team": "Operations",
+        "slack_queries": ["vendor", "contract", "legal", "signing", "logistics"],
+        "jira_query": "vendor contract operations",
+        "lens": (
+            "Execution-focused. Surface operational dependencies, external "
+            "deadlines, and launch logistics risks."
+        ),
+        "default_risk": "medium",
+    },
     "Product": {
         "team": None,  # sees all teams
         "slack_queries": ["blocker", "deadline", "priority", "go-no-go", "readiness"],
@@ -154,137 +321,30 @@ ROLE_CONFIGS: dict[str, dict] = {
     },
 }
 
+_DEFAULT_ROLE_CFG = ROLE_CONFIGS["Product"]
 
-# ---------------------------------------------------------------------------
-# Hardcoded fallbacks  (seeded conflict — must stay intact for the demo)
-# ---------------------------------------------------------------------------
-_FALLBACKS: dict[str, dict] = {
-    "Engineering": {
+
+def _role_cfg(role: str) -> dict:
+    return ROLE_CONFIGS.get(role, _DEFAULT_ROLE_CFG)
+
+
+def _fallback_synthesis(role: str) -> dict:
+    cfg = _role_cfg(role)
+    return {
         "summary": (
-            "Backend is ready except the launch page checkout integration. "
-            "NOVA-142 is blocked: the checkout endpoint changed from /v1/checkout "
-            "to /v2/checkout last night. QA smoke test is also blocked pending that fix."
-        ),
-        "blockers": [
-            "Checkout API changed /v1/checkout → /v2/checkout last night. "
-            "Launch page integration must be updated (NOVA-142).",
-            "QA smoke test blocked until NOVA-142 resolves (NOVA-143).",
-        ],
-        "claims": [
-            {
-                "claim": "Checkout API endpoint changed from /v1/checkout to /v2/checkout last night.",
-                "source_ids": ["doc_api_contract_change", "NOVA-142", "msg_eng_api_change"],
-                "confidence": 0.97, "risk": "high",
-                "source_timestamp": JIRA["NOVA-142"].get("created"),
-            },
-            {
-                "claim": "NOVA-142 is blocked — launch page integration not updated for v2 API.",
-                "source_ids": ["NOVA-142", "doc_backend_ticket"],
-                "confidence": 0.97, "risk": "high",
-                "source_timestamp": JIRA["NOVA-142"].get("updated"),
-            },
-            {
-                "claim": "QA smoke test sign-off blocked pending NOVA-142 resolution.",
-                "source_ids": ["NOVA-143", "doc_qa_bug_report"],
-                "confidence": 0.95, "risk": "high",
-                "source_timestamp": JIRA["NOVA-143"].get("created"),
-            },
-        ],
-    },
-    "Design": {
-        "summary": (
-            "The launch page is final and ready to ship. All assets approved "
-            "and delivered to Engineering. Design has no outstanding work before Monday."
+            f"{role} update unavailable from live synthesis. "
+            "Using conservative fallback summary."
         ),
         "blockers": [],
         "claims": [
             {
-                "claim": "Launch page is final and ready to ship. All assets approved.",
-                "source_ids": ["doc_design_asset_note", "msg_design_launch_ready", "NOVA-140"],
-                "confidence": 0.96, "risk": "low",
-                "source_timestamp": next(
-                    (v["timestamp"] for v in SLACK.values() if v["role"] == "Design"), None
-                ),
-            },
-            {
-                "claim": "Design sign-off complete. Figma handoff delivered to Engineering.",
-                "source_ids": ["doc_design_asset_note", "NOVA-140"],
-                "confidence": 0.96, "risk": "low",
-                "source_timestamp": JIRA.get("NOVA-140", {}).get("updated"),
-            },
+                "claim": f"{role} status requires verification from source systems.",
+                "source_ids": [],
+                "confidence": 0.55,
+                "risk": cfg.get("default_risk", "medium"),
+            }
         ],
-    },
-    "GTM": {
-        "summary": (
-            "Launch email is drafted and internally reviewed. Blocked on legal pricing "
-            "sign-off. No external comms have gone out yet. Send target is Monday 9:30 AM PT."
-        ),
-        "blockers": [
-            "Legal pricing approval not received — launch email cannot be sent (NOVA-141).",
-        ],
-        "claims": [
-            {
-                "claim": "Launch email draft complete, awaiting legal pricing sign-off.",
-                "source_ids": ["doc_gtm_notes", "NOVA-141", "msg_gtm_email_preview"],
-                "confidence": 0.92, "risk": "medium",
-                "source_timestamp": next(
-                    (v["timestamp"] for v in SLACK.values() if v["role"] == "GTM"), None
-                ),
-            },
-            {
-                "claim": "Launch email send blocked until legal confirms pricing.",
-                "source_ids": ["NOVA-141", "doc_gtm_notes"],
-                "confidence": 0.93, "risk": "medium",
-                "source_timestamp": JIRA.get("NOVA-141", {}).get("updated"),
-            },
-            {
-                "claim": "Target send time: Monday 9:30 AM PT, 30 min after go-live.",
-                "source_ids": ["doc_gtm_notes"],
-                "confidence": 0.88, "risk": "low",
-                "source_timestamp": JIRA.get("NOVA-141", {}).get("created"),
-            },
-        ],
-    },
-    "Product": {
-        "summary": (
-            "Launch Alpha is NOT GO. Two critical Engineering blockers (NOVA-142, NOVA-143) "
-            "and one GTM blocker (NOVA-141) unresolved 48 h before Monday. "
-            "Design is complete. Go/no-go decision required by Sunday 6 PM PT."
-        ),
-        "blockers": [
-            "Engineering: NOVA-142 blocked — v2 checkout API integration not updated.",
-            "Engineering: NOVA-143 blocked — QA sign-off depends on NOVA-142.",
-            "GTM: NOVA-141 in review — launch email pending legal pricing approval.",
-        ],
-        "claims": [
-            {
-                "claim": "Launch Alpha is NOT GO as of Friday. Two critical Engineering blockers.",
-                "source_ids": ["doc_launch_readiness", "doc_go_no_go", "NOVA-142", "NOVA-143"],
-                "confidence": 0.95, "risk": "high",
-                "source_timestamp": "2026-04-25T09:00:00Z",
-            },
-            {
-                "claim": "Design complete — launch page assets signed off and delivered.",
-                "source_ids": ["doc_design_asset_note", "NOVA-140"],
-                "confidence": 0.96, "risk": "low",
-                "source_timestamp": JIRA.get("NOVA-140", {}).get("updated"),
-            },
-            {
-                "claim": "Go/no-go decision required by Sunday 6 PM PT.",
-                "source_ids": ["doc_go_no_go"],
-                "confidence": 0.94, "risk": "medium",
-                "source_timestamp": "2026-04-25T09:15:00Z",
-            },
-            {
-                "claim": "Beta NPS is 47 — above the 40 target.",
-                "source_ids": ["doc_beta_feedback"],
-                "confidence": 0.91, "risk": "low",
-                "source_timestamp": "2026-04-24T16:00:00Z",
-            },
-        ],
-    },
-}
-
+    }
 
 # ---------------------------------------------------------------------------
 # TOOL STUBS
@@ -836,9 +896,9 @@ def _detect_deltas(
 # ---------------------------------------------------------------------------
 
 async def _gather_role_data(role: str, context_text: str | None = None) -> dict:
-    cfg = ROLE_CONFIGS[role]
+    cfg = _role_cfg(role)
     team = cfg["team"]
-    team_users = _TEAM_USERS.get(team) if team else None
+    team_users = _team_users_map().get(team) if team else None
 
     slack_task = asyncio.create_task(
         _tool_slack_search(cfg["slack_queries"], team, limit=6)
@@ -1426,6 +1486,7 @@ def _load_rag_docs() -> tuple[list[dict], str]:
 @agent.on_event("startup")
 async def on_startup(ctx: Context):
     global _RAG_DOCS
+    data_source, team_map = _load_runtime_datasets()
     _RAG_DOCS, rag_source = _load_rag_docs()
     gemini_ready, gemini_reason = _gemini_runtime_ready()
 
@@ -1435,12 +1496,13 @@ async def on_startup(ctx: Context):
         f"Status Agent online | address={ctx.agent.address} | port={_PORT}"
     )
     ctx.logger.info(
-        f"Gemini: {'configured' if gemini_ready else 'unavailable — seeded fallback likely'} "
-        f"({gemini_reason}) | "
+        f"Gemini: {'configured' if _GEMINI_KEY else 'not configured — seeded fallback'} | "
         f"Tools: {len(connected)} connected ({', '.join(connected)}), {stub_count} stubs | "
         f"RAG corpus: {rag_source} | "
         f"Roles: {ALL_ROLES}"
     )
+    team_user_counts = {team: len(users) for team, users in team_map.items() if users}
+    ctx.logger.info(f"Runtime datasets: {data_source} | team_user_counts={team_user_counts}")
     if not _MONGODB_URI:
         ctx.logger.warning(
             "MONGODB_URI not set — conversation memory, delta detection, "
@@ -1493,7 +1555,7 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
         elif role not in ROLE_CONFIGS:
             unsupported_roles.append(role)
     if not roles:
-        roles = ALL_ROLES
+        roles = ["Product"]
     now     = datetime.now(UTC).isoformat()
     session_id = msg.session_id or str(uuid.uuid4())
 
@@ -1534,8 +1596,9 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
     for role, result in zip(roles, gather_results):
         if isinstance(result, Exception):
             ctx.logger.warning(f"Data gather failed for {role}: {result}")
+            cfg = _role_cfg(role)
             raw_data[role] = {
-                "role": role, "lens": ROLE_CONFIGS[role]["lens"],
+                "role": role, "lens": cfg["lens"],
                 "slack_messages": [], "jira_tickets": [], "seed_docs": [], "calendar": [],
             }
             tool_counts[role] = 0
@@ -1595,7 +1658,7 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
 
         is_fallback = synth is None
         if is_fallback:
-            synth = _FALLBACKS[role]
+            synth = _fallback_synthesis(role)
             used_fallback = True
             if not role_fallback_reason:
                 role_fallback_reason = "synthesis_returned_none"
@@ -1609,7 +1672,7 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
                 timestamp=now,
                 source_timestamp=c.get("source_timestamp"),
                 confidence=float(c.get("confidence", 0.9)),
-                risk=c.get("risk", ROLE_CONFIGS[role]["default_risk"]),
+                risk=c.get("risk", _role_cfg(role)["default_risk"]),
             )
             for c in synth.get("claims", [])
         ]
