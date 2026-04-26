@@ -1,19 +1,16 @@
 """
-Chat Protocol orchestrator for StandIn.
+StandIn Orchestrator — Chat Protocol entrypoint.
 
-Invoked by ASI:One / Agentverse and routes requests to:
-- status_agent       for status, conflict, and briefing intents
-- historical_agent   for historical questions
-- perform_action     for action requests
+Only the orchestrator should be Agentverse-facing. Downstream agents are
+treated as local workers reached over direct uAgents addresses.
 """
 
+import asyncio
 import json
-import logging
 import os
 import re
 import sys
 import uuid
-import asyncio
 from datetime import UTC, datetime
 
 from dotenv import load_dotenv
@@ -26,8 +23,6 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
 load_dotenv()
 
 try:
@@ -35,9 +30,7 @@ try:
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-from agents.historical_agent.agent import agent as historical_agent
-from agents.perform_action.agent import agent as perform_action_agent
-from agents.status_agent.agent import agent as status_agent
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from models import (
     ActionRequest,
     ActionResponse,
@@ -48,54 +41,40 @@ from models import (
     RAGResponse,
 )
 
-_SEED = os.getenv("ORCHESTRATOR_SEED", "standin_orchestrator_seed_v1")
-_PORT = int(os.getenv("ORCHESTRATOR_PORT", "8001"))
-_GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
-_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-_LOGGER = logging.getLogger("standin_orchestrator")
-
-# Gemini client — created once to reuse TCP/TLS connection across all calls
-_GEMINI_CLIENT = None
+_SEED = os.getenv("AGENTVERSE_SEED")
+_PORT = int(os.getenv("ORCHESTRATOR_PORT", "8000"))
 
 
-def _get_gemini_client():
-    global _GEMINI_CLIENT
-    if _GEMINI_CLIENT is None and _GEMINI_KEY:
-        from google import genai
-        _GEMINI_CLIENT = genai.Client(api_key=_GEMINI_KEY)
-    return _GEMINI_CLIENT
-
-
-def _normalize_submit_endpoint(raw_endpoint: str | None, port: int) -> str | None:
+def _normalize_submit_endpoint(raw_endpoint: str | None) -> str | None:
     if not raw_endpoint:
         return None
     endpoint = raw_endpoint.rstrip("/")
-    if endpoint.endswith("/submit"):
-        return endpoint
-    return f"{endpoint}/submit"
+    return endpoint if endpoint.endswith("/submit") else f"{endpoint}/submit"
 
 
 _ENDPOINT = _normalize_submit_endpoint(
-    os.getenv("ORCHESTRATOR_ENDPOINT") or os.getenv("PUBLIC_BASE_URL"),
-    _PORT,
+    os.getenv("ORCHESTRATOR_ENDPOINT", f"http://127.0.0.1:{_PORT}")
 )
-_AGENTVERSE = (os.getenv("AGENTVERSE_URL") or "").rstrip("/") or None
+_AGENTVERSE = None
 
 orchestrator = Agent(
     name="standin_orchestrator",
     seed=_SEED,
     port=_PORT,
-    endpoint=[_ENDPOINT] if _ENDPOINT else None,
     agentverse=_AGENTVERSE,
-    mailbox=False,
+    mailbox=True,
     publish_agent_details=True,
+    network="testnet"
 )
 
-chat_protocol = Protocol(spec=chat_protocol_spec)
+# Local sub-agent defaults from deterministic seeds; env values override.
+STATUS_AGENT_ADDRESS = os.getenv("STATUS_AGENT_ADDRESS")
+HISTORICAL_AGENT_ADDRESS = os.getenv("HISTORICAL_AGENT_ADDRESS")
+PERFORM_ACTION_ADDRESS = os.getenv("PERFORM_ACTION_ADDRESS")
 
-STATUS_AGENT_ADDRESS = os.getenv("STATUS_AGENT_ADDRESS", status_agent.address)
-HISTORICAL_AGENT_ADDRESS = os.getenv("HISTORICAL_AGENT_ADDRESS", historical_agent.address)
-PERFORM_ACTION_ADDRESS = os.getenv("PERFORM_ACTION_ADDRESS", perform_action_agent.address)
+chat_proto = Protocol(spec=chat_protocol_spec)
+pending_requests: dict[str, dict] = {}
+status_sessions: dict[str, str] = {}
 
 TEAM_ALIASES = {
     "engineering": "Engineering",
@@ -170,57 +149,32 @@ def _extract_text(msg: ChatMessage) -> str:
 
 def _detect_teams(text: str) -> list[str]:
     lowered = text.lower()
-    teams: list[str] = []
+    out: list[str] = []
     for alias, canonical in TEAM_ALIASES.items():
-        if re.search(rf"\b{re.escape(alias)}\b", lowered) and canonical not in teams:
-            teams.append(canonical)
-    return teams
-
-
-def _extract_time_window(text: str) -> str | None:
-    lowered = text.lower()
-    for token in (
-        "today",
-        "tomorrow",
-        "yesterday",
-        "this week",
-        "last week",
-        "this month",
-        "last month",
-        "this quarter",
-        "last quarter",
-    ):
-        if token in lowered:
-            return token
-    match = re.search(
-        r"\b(?:\d{1,2}(?::\d{2})?\s?(?:am|pm)|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
-        lowered,
-    )
-    return match.group(0) if match else None
+        if re.search(rf"\b{re.escape(alias)}\b", lowered) and canonical not in out:
+            out.append(canonical)
+    return out
 
 
 def _is_calendar_read_request(text: str) -> bool:
     lowered = text.lower()
-    calendar_terms = ("meeting", "meetings", "calendar", "event", "events")
-    read_terms = ("what", "show", "list", "read", "upcoming", "next", "have", "find")
-    write_terms = ("schedule", "book", "create", "set up", "invite", "add")
-    has_calendar = any(term in lowered for term in calendar_terms)
-    has_read = any(term in lowered for term in read_terms)
-    has_write = any(term in lowered for term in write_terms)
+    has_calendar = any(t in lowered for t in ("meeting", "meetings", "calendar", "event", "events"))
+    has_read = any(t in lowered for t in ("what", "show", "list", "read", "upcoming", "next", "have", "find"))
+    has_write = any(t in lowered for t in ("schedule", "book", "create", "set up", "invite", "add"))
     return has_calendar and has_read and not has_write
 
 
 def _is_calendar_past_query(text: str) -> bool:
     lowered = text.lower()
-    past_terms = ("past", "previous", "last", "earlier", "history", "happened", "had")
-    calendar_terms = ("meeting", "meetings", "calendar", "event", "events")
-    return any(term in lowered for term in past_terms) and any(term in lowered for term in calendar_terms)
+    return any(t in lowered for t in ("past", "previous", "last", "earlier", "history", "happened", "had")) and any(
+        t in lowered for t in ("meeting", "meetings", "calendar", "event", "events")
+    )
 
 
 def _infer_action_type(text: str) -> str | None:
     lowered = text.lower()
     for action_type, hints in ACTION_HINTS.items():
-        if any(hint in lowered for hint in hints):
+        if any(h in lowered for h in hints):
             if action_type == "send_slack" and "draft" in lowered:
                 continue
             return action_type
@@ -229,18 +183,14 @@ def _infer_action_type(text: str) -> str | None:
 
 def _infer_action_payload(text: str, action_type: str | None) -> dict:
     payload: dict[str, object] = {"original_request": text}
-    if not action_type:
-        return payload
-
     if action_type in {"send_slack", "draft_slack"}:
         channel_match = re.search(r"(#\w[\w-]*)", text)
         payload["channel"] = channel_match.group(1) if channel_match else "#standin-updates"
         payload["text"] = text
     elif action_type == "send_email":
-        payload["to"] = []
-        payload["subject"] = "StandIn request"
-        payload["body"] = text
+        payload.update({"to": [], "subject": "StandIn request", "body": text})
     elif action_type == "create_jira":
+        payload.update({"project": "NOVA", "summary": text[:120], "description": text})
         payload["summary"] = text[:120]
         payload["description"] = text
         payload["issuetype"] = "Task"
@@ -249,17 +199,12 @@ def _infer_action_payload(text: str, action_type: str | None) -> dict:
         payload["status"] = "To Do"
         payload["sprint_name"] = "Sprint 1"
     elif action_type == "update_jira_status":
-        ticket_match = re.search(r"\b([A-Z]{2,10}-\d+)\b", text)
-        payload["ticket_id"] = ticket_match.group(1) if ticket_match else ""
-        payload["new_status"] = "In Progress"
-        payload["comment"] = text
+        ticket = re.search(r"\b([A-Z]{2,10}-\d+)\b", text)
+        payload.update({"ticket_id": ticket.group(1) if ticket else "", "new_status": "In Progress", "comment": text})
     elif action_type == "schedule_meeting":
-        payload["title"] = "StandIn follow-up"
-        payload["attendees"] = []
-        payload["start_time"] = _extract_time_window(text) or ""
+        payload.update({"title": "StandIn follow-up", "attendees": [], "description": text})
         payload["duration_minutes"] = 30
         payload["time_zone"] = "UTC"
-        payload["description"] = text
     elif action_type == "read_calendar_events":
         payload["max_results"] = 10
         payload["query"] = ""
@@ -267,253 +212,116 @@ def _infer_action_payload(text: str, action_type: str | None) -> dict:
         payload["time_max"] = ""
         payload["description"] = text
     elif action_type == "create_action_item":
-        payload["description"] = text
-        payload["owner"] = "unassigned"
-        payload["urgency"] = "medium"
+        payload.update({"description": text, "owner": "unassigned", "urgency": "medium"})
     elif action_type == "post_brief":
-        payload["brief_id"] = str(uuid.uuid4())
-        payload["brief_data"] = {"summary": text}
+        payload.update({"brief_id": str(uuid.uuid4()), "brief_data": {"summary": text}})
     return payload
 
 
-def _fallback_classification(text: str) -> IntentClassification:
-    lowered = text.lower()
+async def _classify(text: str) -> IntentClassification:
     teams = _detect_teams(text)
-    time_window = _extract_time_window(text)
-    action_type = _infer_action_type(text)
-
-    if _is_calendar_read_request(text):
-        action_type = None
-
+    action_type = None if _is_calendar_read_request(text) else _infer_action_type(text)
+    lowered = text.lower()
     if _is_calendar_past_query(text):
         intent = "history_query"
     elif _is_calendar_read_request(text):
         intent = "status_query"
     elif action_type:
         intent = "action_request"
-    elif any(token in lowered for token in ("history", "previous", "earlier", "before", "decided", "past")):
+    elif any(t in lowered for t in ("history", "previous", "earlier", "before", "decided", "past")):
         intent = "history_query"
-    elif any(token in lowered for token in ("conflict", "contradiction", "inconsistent", "disagree")):
+    elif any(t in lowered for t in ("conflict", "contradiction", "inconsistent", "disagree")):
         intent = "conflict_check"
-    elif any(token in lowered for token in ("briefing", "brief", "summary", "recap", "overview")):
+    elif any(t in lowered for t in ("briefing", "brief", "summary", "recap", "overview")):
         intent = "briefing_request"
-    # Person/entity lookups — no team keyword but mentions a name or ticket id → RAG
-    elif not teams and re.search(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b|NOVA-\d+', text):
-        intent = "history_query"
     else:
         intent = "status_query"
 
-    payload_json = None
-    if action_type:
-        payload_json = json.dumps(_infer_action_payload(text, action_type))
-
-    _LOGGER.info(
-        f"Classification (fallback/no-Gemini) | intent={intent} | "
-        f"teams={teams} | action_type={action_type} | confidence=0.45"
-    )
     return IntentClassification(
         intent=intent,
         teams=teams,
         topic=text[:140],
-        time_window=time_window,
+        time_window=None,
         action_type=action_type,
-        action_payload_json=payload_json,
+        action_payload_json=json.dumps(_infer_action_payload(text, action_type)) if action_type else None,
         confidence=0.45,
     )
 
 
-async def _classify(text: str) -> IntentClassification:
-    if not _GEMINI_KEY:
-        return _fallback_classification(text)
-
-    try:
-        from google.genai import types as gt
-
-        client = _get_gemini_client()
-        resp = await client.aio.models.generate_content(
-            model=_GEMINI_MODEL,
-            contents=f"User request:\n{text}",
-            config=gt.GenerateContentConfig(
-                system_instruction=_CLASSIFIER_PROMPT,
-                response_mime_type="application/json",
-            ),
-        )
-        payload = json.loads(resp.text)
-        action_payload_json = payload.get("action_payload_json")
-        if payload.get("intent") == "action_request" and not action_payload_json:
-            action_payload_json = json.dumps(
-                _infer_action_payload(text, payload.get("action_type"))
-            )
-
-        result = IntentClassification(
-            intent=payload.get("intent", "status_query"),
-            teams=payload.get("teams") or [],
-            topic=payload.get("topic"),
-            time_window=payload.get("time_window"),
-            action_type=payload.get("action_type"),
-            action_payload_json=action_payload_json,
-            confidence=float(payload.get("confidence") or 0.0),
-        )
-        _LOGGER.info(
-            f"Classification (Gemini) | intent={result.intent} | "
-            f"teams={result.teams} | action_type={result.action_type} | "
-            f"confidence={result.confidence:.2f}"
-        )
-        return result
-    except Exception as exc:
-        _LOGGER.warning(f"Gemini classification failed, using fallback: {exc}")
-        return _fallback_classification(text)
-
-
-def _enforce_calendar_routing(text: str, cls: IntentClassification) -> IntentClassification:
-    if _is_calendar_past_query(text):
-        cls.intent = "history_query"
-        cls.action_type = None
-        cls.action_payload_json = None
-    elif _is_calendar_read_request(text):
-        cls.intent = "status_query"
-        cls.action_type = None
-        cls.action_payload_json = None
-    return cls
-
-
-def _briefing_roles(classification: IntentClassification) -> list[str] | None:
-    return classification.teams or None
-
-
 def _format_status_response(msg: FullBriefResponse, intent: str) -> str:
-    lines = [
-        f"Status mode: {msg.mode}",
-        f"Overall confidence: {msg.overall_confidence:.2f}",
-    ]
-
-    if msg.role_statuses:
-        lines.append("")
-        lines.append("Role summaries:")
-        for role_status in msg.role_statuses:
-            blockers = "; ".join(role_status.blockers) if role_status.blockers else "none"
-            lines.append(f"- {role_status.role}: {role_status.summary}")
-            lines.append(f"  Blockers: {blockers}")
-
+    lines = [f"Status mode: {msg.mode}", f"Overall confidence: {msg.overall_confidence:.2f}", ""]
+    lines.append("Role summaries:")
+    for role_status in msg.role_statuses:
+        blockers = "; ".join(role_status.blockers) if role_status.blockers else "none"
+        lines.append(f"- {role_status.role}: {role_status.summary}")
+        lines.append(f"  Blockers: {blockers}")
     if intent == "conflict_check":
-        lines.append("")
-        lines.append("Contradictions:")
-        contradictions = msg.contradictions or ["No explicit contradictions found."]
-        for entry in contradictions:
+        lines.extend(["", "Contradictions:"])
+        for entry in (msg.contradictions or ["No explicit contradictions found."]):
             lines.append(f"- {entry}")
-    elif intent == "briefing_request":
-        lines.append("")
-        lines.append(f"Recommended action: {msg.recommended_action}")
-        if msg.evidence_passports:
-            lines.append("Evidence passports:")
-            for passport in msg.evidence_passports[:3]:
-                lines.append(f"- {passport.claim} [{passport.confidence}]")
     else:
-        if msg.contradictions:
-            lines.append("")
-            lines.append("Detected contradictions:")
-            for entry in msg.contradictions[:3]:
-                lines.append(f"- {entry}")
-        lines.append("")
-        lines.append(f"Recommended action: {msg.recommended_action}")
-
+        lines.extend(["", f"Recommended action: {msg.recommended_action}"])
     return "\n".join(lines)
 
 
 def _format_history_response(msg: RAGResponse) -> str:
     sources = ", ".join(msg.source_ids) if msg.source_ids else "none"
-    return (
-        f"{msg.answer}\n\n"
-        f"Sources: {sources}\n"
-        f"Confidence: {msg.confidence:.2f} via {msg.retrieval_method}"
-    )
+    return f"{msg.answer}\n\nSources: {sources}\nConfidence: {msg.confidence:.2f} via {msg.retrieval_method}"
 
 
 def _format_action_response(msg: ActionResponse) -> str:
     if msg.success:
-        text = msg.result or f"Action {msg.action_type} completed."
+        out = msg.result or f"Action {msg.action_type} completed."
         if msg.stub:
-            text += "\n\nNote: this was executed in stub mode."
-        return text
+            out += "\n\nNote: this was executed in stub mode."
+        return out
     return msg.error or f"Action {msg.action_type} failed."
 
 
-async def _send_chat_reply(ctx: Context, recipient: str, text: str) -> None:
+async def _send_reply(ctx: Context, recipient: str, text: str) -> None:
     await ctx.send(
         recipient,
         ChatMessage(
             timestamp=datetime.now(UTC),
             msg_id=uuid.uuid4(),
-            content=[
-                TextContent(type="text", text=text),
-                EndSessionContent(type="end-session"),
-            ],
+            content=[TextContent(type="text", text=text), EndSessionContent(type="end-session")],
         ),
     )
 
 
-@chat_protocol.on_message(ChatMessage)
-async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
-    await ctx.send(
-        sender,
-        ChatAcknowledgement(
-            timestamp=datetime.now(UTC),
-            acknowledged_msg_id=msg.msg_id,
-        ),
-    )
-
-    user_text = _extract_text(msg)
+@chat_proto.on_message(ChatMessage)
+async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
+    await ctx.send(sender, ChatAcknowledgement(timestamp=datetime.now(UTC), acknowledged_msg_id=msg.msg_id))
+    user_text = "".join(item.text for item in msg.content if isinstance(item, TextContent)).strip()
     if not user_text:
-        await _send_chat_reply(ctx, sender, "I did not receive any text to route.")
+        await _send_reply(ctx, sender, "I did not receive any text to route.")
         return
 
-    classification = _enforce_calendar_routing(user_text, await _classify(user_text))
-    ctx.logger.info(f"Incoming | sender={sender[:24]}… | text='{user_text[:120]}'")
+    classification = await _classify(user_text)
     request_id = str(uuid.uuid4())
+    pending_requests[request_id] = {"sender": sender, "intent": classification.intent}
 
-    pending_requests[request_id] = {
-        "sender": sender,
-        "intent": classification.intent,
-    }
-
-    ctx.logger.info(
-        f"Routing | id={request_id} | intent={classification.intent} | "
-        f"teams={classification.teams} | topic={classification.topic} | "
-        f"action_type={classification.action_type} | confidence={classification.confidence:.2f}"
-    )
-
-    if classification.intent in {"status_query", "conflict_check", "briefing_request"}:
-        session_id = status_sessions.get(sender)
-        roles = _briefing_roles(classification)
-        ctx.logger.info(
-            f"→ StatusAgent | id={request_id} | roles={roles} | "
-            f"session_id={session_id} | dest={STATUS_AGENT_ADDRESS[:24]}…"
-        )
+    if classification.intent in ("status_query", "conflict_check", "briefing_request"):
         await ctx.send(
             STATUS_AGENT_ADDRESS,
             FullBriefRequest(
                 request_id=request_id,
                 user_email=sender,
                 topic=classification.topic,
-                roles=roles,
+                roles=classification.teams or None,
                 context=user_text,
-                session_id=session_id,
+                session_id=status_sessions.get(sender),
             ),
         )
         return
 
     if classification.intent == "history_query":
-        role_filter = classification.teams[0] if classification.teams else None
-        ctx.logger.info(
-            f"→ HistoricalAgent | id={request_id} | role_filter={role_filter} | "
-            f"dest={HISTORICAL_AGENT_ADDRESS[:24]}…"
-        )
         await ctx.send(
             HISTORICAL_AGENT_ADDRESS,
             RAGRequest(
                 request_id=request_id,
                 question=user_text,
-                role_filter=role_filter,
+                role_filter=classification.teams[0] if classification.teams else None,
                 top_k=5,
             ),
         )
@@ -523,27 +331,14 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
         action_type = classification.action_type or _infer_action_type(user_text)
         if not action_type:
             pending_requests.pop(request_id, None)
-            ctx.logger.warning(f"action_request but no action_type detected | id={request_id}")
-            await _send_chat_reply(
-                ctx,
-                sender,
-                "I could not determine which action to run. Try asking explicitly to send Slack, send email, create Jira, schedule a meeting, or create an action item.",
-            )
+            await _send_reply(ctx, sender, "I could not determine which action to run.")
             return
-
-        payload_json = classification.action_payload_json or json.dumps(
-            _infer_action_payload(user_text, action_type)
-        )
-        ctx.logger.info(
-            f"→ PerformAction | id={request_id} | action_type={action_type} | "
-            f"dest={PERFORM_ACTION_ADDRESS[:24]}…"
-        )
         await ctx.send(
             PERFORM_ACTION_ADDRESS,
             ActionRequest(
                 request_id=request_id,
                 action_type=action_type,
-                payload=payload_json,
+                payload=classification.action_payload_json or json.dumps(_infer_action_payload(user_text, action_type)),
                 context=user_text,
                 priority="normal",
             ),
@@ -551,71 +346,55 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
         return
 
     pending_requests.pop(request_id, None)
-    ctx.logger.warning(f"Unclassified request | id={request_id} | intent={classification.intent}")
-    await _send_chat_reply(ctx, sender, "I could not classify that request.")
+    await _send_reply(ctx, sender, "I could not classify that request.")
 
 
-@chat_protocol.on_message(ChatAcknowledgement)
-async def handle_chat_ack(_: Context, __: str, ___: ChatAcknowledgement):
-    return
+@chat_proto.on_message(ChatAcknowledgement)
+async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
+    _ = ctx
+    _ = sender
+    _ = msg
 
 
 @orchestrator.on_message(FullBriefResponse)
 async def handle_status_response(ctx: Context, sender: str, msg: FullBriefResponse):
-    ctx.logger.info(
-        f"← FullBriefResponse | id={msg.request_id} | mode={msg.mode} | "
-        f"escalation={msg.escalation_required} | confidence={msg.overall_confidence:.2f} | "
-        f"contradictions={len(msg.contradictions)} | passports={len(msg.evidence_passports)} | "
-        f"deltas={len(msg.delta_claims or [])}"
-    )
+    _ = sender
     pending = pending_requests.pop(msg.request_id, None)
     if not pending:
-        ctx.logger.warning(
-            f"FullBriefResponse id={msg.request_id} has no matching pending request — dropped"
-        )
         return
-
     status_sessions[pending["sender"]] = msg.session_id or status_sessions.get(pending["sender"], "")
-    text = _format_status_response(msg, pending["intent"])
-    ctx.logger.info(f"→ User | id={msg.request_id} | reply_len={len(text)} chars")
-    await _send_chat_reply(ctx, pending["sender"], text)
+    await _send_reply(ctx, pending["sender"], _format_status_response(msg, pending["intent"]))
 
 
 @orchestrator.on_message(RAGResponse)
 async def handle_history_response(ctx: Context, sender: str, msg: RAGResponse):
-    ctx.logger.info(
-        f"← RAGResponse | id={msg.request_id} | method={msg.retrieval_method} | "
-        f"confidence={msg.confidence:.2f} | sources={msg.source_ids}"
-    )
+    _ = sender
     pending = pending_requests.pop(msg.request_id, None)
     if not pending:
-        ctx.logger.warning(
-            f"RAGResponse id={msg.request_id} has no matching pending request — dropped"
-        )
         return
-
-    ctx.logger.info(f"→ User | id={msg.request_id} | reply_len={len(msg.answer)} chars")
-    await _send_chat_reply(ctx, pending["sender"], _format_history_response(msg))
+    await _send_reply(ctx, pending["sender"], _format_history_response(msg))
 
 
 @orchestrator.on_message(ActionResponse)
 async def handle_action_response(ctx: Context, sender: str, msg: ActionResponse):
-    ctx.logger.info(
-        f"← ActionResponse | id={msg.request_id} | type={msg.action_type} | "
-        f"success={msg.success} | stub={msg.stub} | action_id={msg.action_id}"
-    )
+    _ = sender
     pending = pending_requests.pop(msg.request_id, None)
     if not pending:
-        ctx.logger.warning(
-            f"ActionResponse id={msg.request_id} has no matching pending request — dropped"
-        )
         return
-
-    ctx.logger.info(f"→ User | id={msg.request_id} | result='{(msg.result or msg.error or '')[:80]}'")
-    await _send_chat_reply(ctx, pending["sender"], _format_action_response(msg))
+    await _send_reply(ctx, pending["sender"], _format_action_response(msg))
 
 
-orchestrator.include(chat_protocol, publish_manifest=True)
+orchestrator.include(chat_proto, publish_manifest=True)
+
+
+@orchestrator.on_event("startup")
+async def on_startup(ctx: Context):
+    ctx.logger.info(f"Orchestrator started: {ctx.agent.address}")
+    ctx.logger.info(f"Status Agent:     {STATUS_AGENT_ADDRESS}")
+    ctx.logger.info(f"Historical Agent: {HISTORICAL_AGENT_ADDRESS}")
+    ctx.logger.info(f"Perform Action:   {PERFORM_ACTION_ADDRESS}")
+    if _AGENTVERSE:
+        ctx.logger.info("Agentverse enabled for orchestrator only.")
 
 
 if __name__ == "__main__":

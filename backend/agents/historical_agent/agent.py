@@ -1,22 +1,4 @@
-"""
-Historical Agent — StandIn  (port 8009)
-
-Answers historical questions about meetings, decisions, and org documents.
-Runs in parallel with status_agent — status_agent answers "what is the
-current status?", this agent answers "what was decided / what happened before?".
-
-Retrieval pipeline (three tiers, automatic fallback):
-  Tier 1 — MongoDB Atlas Vector Search  (when MONGODB_URI + vector index ready)
-  Tier 2 — Keyword search over all 25 seed documents  (always available, no setup)
-  Tier 3 — Gemini synthesis with no retrieved context  (last resort)
-
-To activate Tier 1:
-  1. Run:  python data/seed_db.py   (seeds docs + embeddings into MongoDB)
-  2. Create the vector index in Atlas UI (seed_db.py prints instructions).
-
-Run: python backend/agents/historical_agent/agent.py
-"""
-
+import asyncio
 import glob
 import json
 import math
@@ -46,6 +28,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 _SEED = os.getenv("HISTORICAL_AGENT_SEED", "historical_agent_standin_seed_v1")
 _PORT = int(os.getenv("HISTORICAL_AGENT_PORT", "8009"))
+_ENDPOINT = os.getenv("HISTORICAL_AGENT_ENDPOINT", f"http://127.0.0.1:{_PORT}/submit")
 _GEMINI_KEY   = os.getenv("GEMINI_API_KEY", "")
 _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _MONGODB_URI  = os.getenv("MONGODB_URI", "")
@@ -64,12 +47,22 @@ def _get_gemini_client():
     return _GEMINI_CLIENT
 
 
+def _ensure_event_loop() -> None:
+    """Python 3.14 no longer provides an implicit main-thread loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+_ensure_event_loop()
+
 agent = Agent(
     name="historical_agent",
     seed=_SEED,
     port=_PORT,
-    mailbox=False,
-    publish_agent_details=False,
+    endpoint=[f"http://localhost:{_PORT}/submit"],
+    network="testnet"
 )
 
 _SYSTEM = (

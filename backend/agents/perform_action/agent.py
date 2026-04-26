@@ -1,23 +1,4 @@
-"""
-Perform Action Agent — StandIn  (port 8008)
-
-Executes actions on behalf of the orchestrator or escalation agent.
-Each action stub documents exactly which MCP tool replaces it.
-MongoDB-backed actions (create_action_item, post_brief) work today when
-MONGODB_URI is set. All others return stub confirmations until MCP is wired.
-
-Human approval gate
--------------------
-Actions in _APPROVAL_REQUIRED are not executed immediately. They are saved to
-standin.pending_approvals and a pending response is returned. A human then
-calls the REST endpoints to approve or reject:
-
-  GET  /approvals          — list all pending actions
-  POST /approvals/approve  — approve and execute (body: ApproveRequest)
-  POST /approvals/reject   — reject without executing (body: RejectRequest)
-
-Run: python backend/agents/perform_action/agent.py
-"""
+import asyncio
 import json
 import logging
 import os
@@ -49,7 +30,23 @@ from models import (
     RejectRequest,
     RejectResponse,
 )
-from backend.schemas.action_payloads import normalize_action_payload
+try:
+    from schemas.action_payloads import normalize_action_payload
+except Exception:
+    def normalize_action_payload(action_type: str, payload: dict, context: dict):
+        """
+        Lightweight fallback normalizer for local/dev runs.
+        Returns: (ok, normalized_payload, error_message)
+        """
+        if not isinstance(payload, dict):
+            return False, {}, "Payload must be a JSON object."
+
+        normalized = dict(payload)
+        if action_type == "send_slack":
+            owner = (context or {}).get("owner") or ""
+            if owner and not normalized.get("user_id"):
+                normalized["user_id"] = owner
+        return True, normalized, None
 
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
@@ -60,13 +57,31 @@ try:
     from services.calendar_service import add_reminder as add_calendar_reminder
     from services.calendar_service import get_event as get_calendar_event
     from services.calendar_service import list_events as list_calendar_events
-<<<<<<< HEAD
     from services.slack_service import post_as_user
     from services.jira_service import create_ticket as create_jira_ticket
     from services.jira_service import update_ticket_status as update_jira_ticket_status
-=======
+except Exception:
+    create_event = None
+    add_calendar_reminder = None
+    get_calendar_event = None
+    list_calendar_events = None
+    post_as_user = None
+    create_jira_ticket = None
+    update_jira_ticket_status = None
+
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from services.calendar_service import create_event
+    from services.calendar_service import add_reminder as add_calendar_reminder
+    from services.calendar_service import get_event as get_calendar_event
+    from services.calendar_service import list_events as list_calendar_events
+    from services.slack_service import post_as_user
+    from services.jira_service import create_ticket as create_jira_ticket
+    from services.jira_service import update_ticket_status as update_jira_ticket_status
     from services.slackService import postAsUser, postAsBot
->>>>>>> main
 except Exception:
     create_event = None
     add_calendar_reminder = None
@@ -84,12 +99,23 @@ _PORT = int(os.getenv("PERFORM_ACTION_PORT", "8008"))
 _MONGODB_URI = os.getenv("MONGODB_URI", "")
 _LOGGER = logging.getLogger("perform_action")
 
+
+def _ensure_event_loop() -> None:
+    """Python 3.14 no longer provides an implicit main-thread loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
+
+_ensure_event_loop()
+
 agent = Agent(
     name="perform_action",
     seed=_SEED,
     port=_PORT,
-    mailbox=False,
-    publish_agent_details=False,
+    endpoint=[f"http://localhost:{_PORT}/submit"],
+    network="testnet"
 )
 
 
