@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import UTC, datetime
 from urllib.parse import quote_plus
@@ -6,6 +7,8 @@ import requests
 from pymongo import MongoClient
 
 from services.jira_auth import get_base_url, get_jira_headers, get_project_key
+
+_LOGGER = logging.getLogger("jira_service")
 
 
 def _get_db():
@@ -216,6 +219,17 @@ def create_ticket(details: dict) -> dict:
     base_url, project_key = _require_jira_config()
     headers = get_jira_headers()
 
+    _LOGGER.info(
+        "Jira create_ticket request | "
+        f"project={project_key} | summary='{details.get('summary', '')[:120]}' | "
+        f"issuetype={details.get('issuetype', 'Task')} | "
+        f"priority={details.get('priority', 'Medium')} | "
+        f"labels={details.get('labels', [])} | "
+        f"status={details.get('status', 'To Do')} | "
+        f"sprint='{details.get('sprint_name', '')}' | "
+        f"assignee={details.get('assignee_account_id', '')}"
+    )
+
     issue_type_map = _get_project_issue_type_map(base_url, headers, project_key)
     created = _create_issue_with_fallbacks(base_url, headers, project_key, details, issue_type_map)
 
@@ -269,6 +283,13 @@ def create_ticket(details: dict) -> dict:
         result["transitionWarning"] = transition_error
     if sprint_error:
         result["sprintWarning"] = sprint_error
+
+    _LOGGER.info(
+        "Jira create_ticket success | "
+        f"issueKey={issue_key} | issueId={issue_id} | url={issue_url} | "
+        f"status={final_status} | sprintId={sprint_id} | sprintName='{sprint_name or ''}' | "
+        f"transitionWarning='{transition_error}' | sprintWarning='{sprint_error}'"
+    )
     return result
 
 
@@ -296,15 +317,27 @@ def search_tickets(query: str = "", max_results: int = 20) -> list:
     jql = " AND ".join(jql_parts) + " ORDER BY updated DESC"
     encoded_jql = quote_plus(jql)
 
-    response = requests.get(
-        f"{base_url}/rest/api/3/issue/search"
-        f"?jql={encoded_jql}&maxResults={max_results}"
-        f"&fields=summary,description,status,priority,assignee,labels,updated,created",
-        headers=headers,
-        timeout=15,
+    query_string = (
+        f"jql={encoded_jql}&maxResults={max_results}"
+        f"&fields=summary,description,status,priority,assignee,labels,updated,created"
     )
-    response.raise_for_status()
-    return response.json().get("issues", [])
+    # Jira Cloud search endpoints differ across tenants/API rollouts.
+    # Try the newer endpoint first, then fall back to the legacy one.
+    candidate_urls = [
+        f"{base_url}/rest/api/3/search?{query_string}",
+    ]
+    last_response = None
+    for url in candidate_urls:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 404:
+            last_response = response
+            continue
+        response.raise_for_status()
+        return response.json().get("issues", [])
+
+    if last_response is not None:
+        last_response.raise_for_status()
+    return []
 
 
 def get_tickets(filters: dict) -> list:
@@ -340,11 +373,22 @@ def get_tickets(filters: dict) -> list:
     jql = " AND ".join(jql_parts)
     encoded_jql = quote_plus(jql)
 
-    response = requests.get(
-        f"{base_url}/rest/api/3/issue/search?jql={encoded_jql}&maxResults=20",
-        headers=headers,
-        timeout=20,
-    )
-    response.raise_for_status()
-    result = response.json()
-    return result.get("issues", [])
+    query_string = f"jql={encoded_jql}&maxResults=20"
+    candidate_urls = [
+        f"{base_url}/rest/api/3/search/jql?{query_string}",
+        f"{base_url}/rest/api/3/search?{query_string}",
+        f"{base_url}/rest/api/3/issue/search?{query_string}",
+    ]
+    last_response = None
+    for url in candidate_urls:
+        response = requests.get(url, headers=headers, timeout=20)
+        if response.status_code == 404:
+            last_response = response
+            continue
+        response.raise_for_status()
+        result = response.json()
+        return result.get("issues", [])
+
+    if last_response is not None:
+        last_response.raise_for_status()
+    return []
