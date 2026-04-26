@@ -1,0 +1,12 @@
+{
+  "id": "doc_design_asset_note",
+  "filename": "doc_design_asset_note.json",
+  "title": "Launch Page Design Handoff — Final Assets Delivered",
+  "type": "design_note",
+  "role": "Design",
+  "author": "priya.mehta",
+  "timestamp": "2026-04-24T16:30:00Z",
+  "tags": ["design", "launch-page", "assets", "handoff", "nova-140", "launch-alpha"],
+  "content": "DESIGN HANDOFF COMPLETE — Launch Page Final Assets\nAuthor: Priya Mehta | Date: 2026-04-24 16:30 UTC\nTicket: NOVA-140 (Done)\n\nAll launch page design assets have been finalized and delivered to Engineering.\n\nDelivered:\n- Figma file: NovaLoop Launch Page v4 Final (link: figma.com/file/novaloop-launch-v4)\n- Export package: /design/exports/launch-page-2026-04-24/\n  - Hero section: hero_final.png, hero_final@2x.png\n  - CTA button variants: cta_primary.svg, cta_hover.svg\n  - Feature icons (6): feature_icons_set.svg\n  - Mobile breakpoint specs included\n\nDesign review sign-off: Alice Chen (Product) — 2026-04-24 15:45\nDesign status: READY TO SHIP — no open design tasks remain.\n\nNote: All assets approved by stakeholders in the 2026-04-24 design review meeting.",
+  "sensitive_flags": []
+}

@@ -1,0 +1,12 @@
+{
+  "id": "doc_derek_vasquez",
+  "filename": "doc_derek_vasquez.json",
+  "title": "Team Profile — Derek Vasquez, Lead Engineer",
+  "type": "team_profile",
+  "role": "Engineering",
+  "author": "alice.chen",
+  "timestamp": "2026-04-01T09:00:00Z",
+  "tags": ["engineering", "team", "derek", "derek-vasquez", "lead-engineer", "profile"],
+  "content": "TEAM PROFILE: Derek Vasquez\nRole: Lead Engineer | Team: Engineering | Email: derek.vasquez@novaloop.io\n\nResponsibilities:\n- Owns backend architecture for Checkout AI Assistant\n- Leads API design and integration contracts\n- Coordinates with Design and Product on feature specs\n- Primary escalation contact for engineering blockers\n\nCurrent assignments (Launch Alpha Sprint 4):\n- NOVA-142 (BLOCKED, critical): Launch page v2 checkout API integration\n  Owner and assignee. Filed 2026-04-25 after overnight API migration.\n- NOVA-139 (Done): Gemini summarization for checkout flow\n  Completed 2026-04-24. Merged to main.\n\nRecent activity:\n- 2026-04-25 02:18 — Posted #engineering alert about /v1→/v2 API migration\n- 2026-04-25 09:05 — Responded to Alice's status check: 'Still blocked. Fix in progress.'\n- Lead on call for launch weekend (2026-04-26 through 2026-04-28)\n\nSkills: Python, FastAPI, PostgreSQL, Gemini API, payment integrations",
+  "sensitive_flags": []
+}

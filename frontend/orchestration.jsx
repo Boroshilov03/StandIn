@@ -93,13 +93,13 @@ function OrchestrationMonitor({ activeTrace: propActiveTrace }) {
                   active={activeTrace === 'status'}
                 />
                 <FlowBranch
-                  tag="Intent 4"
-                  agent="Historical Agent"
-                  port="8009"
+                  tag="Intent 4 · fan-out"
+                  agent="Historical Agent + Status Agent"
+                  port="8009 + 8007"
                   tools={[
-                    { name: 'Tier 1 — Vector',  stub: false },
-                    { name: 'Tier 2 — Keyword', stub: false },
-                    { name: 'Synthesise',        stub: false },
+                    { name: '↗ Historical: Vector / Keyword', stub: false },
+                    { name: '↗ Status: JIRA + Slack + RAG',  stub: false },
+                    { name: 'Merge — historical + live',      stub: false },
                   ]}
                   active={activeTrace === 'historical'}
                 />

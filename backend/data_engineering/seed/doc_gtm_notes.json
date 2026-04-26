@@ -1,0 +1,12 @@
+{
+  "id": "doc_gtm_notes",
+  "filename": "doc_gtm_notes.json",
+  "title": "Launch Alpha GTM Notes — Email Campaign & Legal Review",
+  "type": "gtm_notes",
+  "role": "GTM",
+  "author": "sam.okafor",
+  "timestamp": "2026-04-25T09:10:00Z",
+  "tags": ["gtm", "launch-email", "pricing", "legal", "nova-141", "launch-alpha"],
+  "content": "GTM STATUS — Launch Alpha Email Campaign\nAuthor: Sam Okafor | Updated: 2026-04-25 09:10 UTC\nTicket: NOVA-141 | Status: IN REVIEW\n\nLaunch email status:\n- Draft: COMPLETE (reviewed internally by Alice and Sam)\n- Subject: 'Introducing Checkout AI Assistant — smarter checkout starts today'\n- Target send: Monday 2026-04-28 09:30 PT (30 min after go-live)\n- List size: ~12,000 beta waitlist subscribers\n\nBlocker: Legal pricing sign-off\nLegal review is pending on the pricing copy in the email. The phrase 'starting at $0 for the first 3 months' requires legal confirmation that this does not conflict with the enterprise agreement terms. [LEGAL-PENDING: pricing language under review — do not publish]\n\nSend timeline:\n- If legal approves by Sunday 18:00 PT → send Monday 09:30 PT on schedule\n- If delayed → send Monday 12:00 PT (fallback)\n\nAll other GTM assets ready: landing page copy, social posts, press brief.",
+  "sensitive_flags": ["legal_pending"]
+}

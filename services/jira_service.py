@@ -279,6 +279,34 @@ def update_ticket_status(issue_key: str, new_status: str) -> dict:
     return {"issueKey": issue_key, "status": new_status}
 
 
+def search_tickets(query: str = "", max_results: int = 20) -> list:
+    """
+    Fetch open tickets from the configured Jira project.
+    query: optional text to narrow results (JQL `text ~`). Empty = all open tickets.
+    Returns raw Jira issue dicts with fields populated.
+    """
+    base_url, project_key = _require_jira_config()
+    headers = get_jira_headers()
+
+    jql_parts = [f"project = {project_key}", "statusCategory != Done"]
+    if query.strip():
+        safe_q = query.strip().replace('"', '\\"')
+        jql_parts.append(f'text ~ "{safe_q}"')
+
+    jql = " AND ".join(jql_parts) + " ORDER BY updated DESC"
+    encoded_jql = quote_plus(jql)
+
+    response = requests.get(
+        f"{base_url}/rest/api/3/issue/search"
+        f"?jql={encoded_jql}&maxResults={max_results}"
+        f"&fields=summary,description,status,priority,assignee,labels,updated,created",
+        headers=headers,
+        timeout=15,
+    )
+    response.raise_for_status()
+    return response.json().get("issues", [])
+
+
 def get_tickets(filters: dict) -> list:
     """
     filters = {

@@ -34,13 +34,9 @@ try:
     from schemas.action_payloads import normalize_action_payload
 except Exception:
     def normalize_action_payload(action_type: str, payload: dict, context: dict):
-        """
-        Lightweight fallback normalizer for local/dev runs.
-        Returns: (ok, normalized_payload, error_message)
-        """
+        """Lightweight fallback normalizer. Returns: (ok, normalized_payload, error_message)"""
         if not isinstance(payload, dict):
             return False, {}, "Payload must be a JSON object."
-
         normalized = dict(payload)
         if action_type == "send_slack":
             owner = (context or {}).get("owner") or ""
@@ -66,28 +62,7 @@ except Exception:
     get_calendar_event = None
     list_calendar_events = None
     post_as_user = None
-    create_jira_ticket = None
-    update_jira_ticket_status = None
-
-ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-try:
-    from services.calendar_service import create_event
-    from services.calendar_service import add_reminder as add_calendar_reminder
-    from services.calendar_service import get_event as get_calendar_event
-    from services.calendar_service import list_events as list_calendar_events
-    from services.slack_service import post_as_user
-    from services.jira_service import create_ticket as create_jira_ticket
-    from services.jira_service import update_ticket_status as update_jira_ticket_status
-    from services.slackService import postAsUser, postAsBot
-except Exception:
-    create_event = None
-    add_calendar_reminder = None
-    get_calendar_event = None
-    list_calendar_events = None
-    post_as_user = None
+    postAsBot = None
     create_jira_ticket = None
     update_jira_ticket_status = None
 

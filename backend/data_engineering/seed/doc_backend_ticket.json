@@ -1,0 +1,12 @@
+{
+  "id": "doc_backend_ticket",
+  "filename": "doc_backend_ticket.json",
+  "title": "NOVA-142 Engineering Notes — Launch Page v2 Integration",
+  "type": "engineering_notes",
+  "role": "Engineering",
+  "author": "derek.vasquez",
+  "timestamp": "2026-04-25T09:05:00Z",
+  "tags": ["nova-142", "checkout", "api-v2", "launch-page", "blocker", "engineering"],
+  "content": "NOVA-142 — Update launch page integration for v2 checkout API\nStatus: BLOCKED | Priority: Critical | Assignee: Derek Vasquez\n\nRoot cause: checkout API migrated to v2 overnight (2026-04-25 01:45 UTC). Launch page still sends requests to /v1/checkout which will soon return 410.\n\nFix required:\n1. Update checkout fetch call in launch-page/src/checkout.js from /v1/checkout to /v2/checkout\n2. Remap request body: replace card_details with payment_method_token\n3. Update response handler to use checkout_session_id\n4. Run integration test suite\n5. Merge and notify Kai for QA re-run\n\nEstimated fix time: 2-3 hours once unblocked. ETA Monday 07:00 PT if starting tonight.",
+  "sensitive_flags": []
+}

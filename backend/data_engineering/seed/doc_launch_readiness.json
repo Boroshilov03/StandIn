@@ -1,0 +1,12 @@
+{
+  "id": "doc_launch_readiness",
+  "filename": "doc_launch_readiness.json",
+  "title": "Launch Alpha Readiness Assessment — 2026-04-25",
+  "type": "readiness_report",
+  "role": "Product",
+  "author": "alice.chen",
+  "timestamp": "2026-04-25T09:15:00Z",
+  "tags": ["product", "launch-alpha", "readiness", "go-no-go", "cross-team"],
+  "content": "LAUNCH ALPHA READINESS ASSESSMENT\nAuthor: Alice Chen | Date: 2026-04-25 09:15 UTC\nDeadline: Monday 2026-04-28 09:00 PT\n\nOVERALL STATUS: NOT GO\n\nTeam readiness:\n\nEngineering: BLOCKED\n- NOVA-142 (critical): Launch page checkout integration not updated for v2 API\n- NOVA-143 (critical): QA smoke test blocked pending NOVA-142 fix\n- NOVA-139 (done): Gemini summarization complete\n- Fix ETA: Monday 07:00 PT if Derek starts tonight\n\nDesign: READY\n- All assets delivered (NOVA-140 done)\n- No open design work\n\nGTM: BLOCKED (soft)\n- Launch email draft complete\n- Legal pricing sign-off outstanding (NOVA-141 in review)\n- Fallback send time available if delayed\n\nProduct: WAITING\n- Go/no-go decision required by Sunday 18:00 PT\n- Two critical blockers must resolve before decision\n\nCritical path: NOVA-142 → NOVA-143 → QA sign-off → go/no-go → launch",
+  "sensitive_flags": []
+}

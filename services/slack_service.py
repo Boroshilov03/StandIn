@@ -112,3 +112,49 @@ def post_as_user(user_id: str, text: str, channel: str | None = None) -> dict:
 # Backward-compatible alias for existing callers.
 def postAsUser(user_id: str, text: str, channel: str | None = None) -> dict:
     return post_as_user(user_id=user_id, text=text, channel=channel)
+
+
+def postAsBot(text: str, channel: str | None = None) -> dict:
+    """
+    Post a Slack message as the StandIn bot (not as a user).
+    Uses chat.postMessage with the bot's own username/icon.
+    channel is resolved via slack_channels; omit for default.
+    """
+    slack_token = os.getenv("SLACK_BOT_TOKEN", "")
+    if not slack_token:
+        raise RuntimeError("SLACK_BOT_TOKEN is not set.")
+    if not (text or "").strip():
+        raise ValueError("Slack message text is required.")
+
+    db = _get_db()
+    target_channel = resolve_slack_channel_for_post(db, channel)
+
+    # Get bot identity from a special system user or use defaults
+    bot_user = db["users"].find_one({"_id": "standin_bot"}, {"_id": 0, "slackDisplayName": 1, "avatarEmoji": 1})
+    if not bot_user:
+        # Fallback to default bot identity
+        bot_user = {"slackDisplayName": "StandIn", "avatarEmoji": ":robot_face:"}
+
+    payload = {
+        "channel": target_channel,
+        "text": text,
+        "username": bot_user["slackDisplayName"],
+        "icon_emoji": bot_user["avatarEmoji"],
+    }
+    body = json.dumps(payload).encode("utf-8")
+
+    req = request.Request(
+        SLACK_POST_MESSAGE_URL,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {slack_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with request.urlopen(req, timeout=15) as response:
+        raw = response.read().decode("utf-8")
+    result = json.loads(raw)
+    if not result.get("ok"):
+        raise RuntimeError(f"Slack API error: {result.get('error', 'unknown_error')}")
+    return result
