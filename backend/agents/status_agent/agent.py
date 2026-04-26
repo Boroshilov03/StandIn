@@ -1395,15 +1395,8 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
 
     # ── Phase 1: gather raw data per role (parallel) ──────────────────────
     t1 = time.monotonic()
-<<<<<<< HEAD
     gather_tasks = {role: asyncio.create_task(_gather_role_data(role, msg.context)) for role in roles}
     gather_results = await asyncio.gather(*gather_tasks.values(), return_exceptions=True)
-=======
-    gather_results = await asyncio.gather(
-        *[_gather_role_data(role, msg.context) for role in roles],
-        return_exceptions=True,
-    )
->>>>>>> main
     t1_ms = int((time.monotonic() - t1) * 1000)
     raw_data: dict[str, dict] = {}
     tool_counts: dict[str, int] = {}
