@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+server.log
+ollama.log
+redact_output.json
