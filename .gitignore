@@ -42,3 +42,6 @@ client_secret.json
 Thumbs.db
 
 node_modules
+
+gx10.err.log
+gx10.out.log
