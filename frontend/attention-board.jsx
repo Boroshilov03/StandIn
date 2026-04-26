@@ -531,12 +531,85 @@ function HistoryResult({ result }) {
   );
 }
 
+function GX10TrustChip({ gx10 }) {
+  const [open, setOpen] = useState(false);
+  if (!gx10) return null;
+  const skipped     = gx10.status === 'skipped';
+  const fields      = gx10.sensitive_fields_redacted || 0;
+  const sources     = gx10.redacted_sources || [];
+  const sentToCloud = gx10.raw_documents_sent_to_cloud || 0;
+  const docs        = gx10.documents_processed || 0;
+  const tone = skipped ? 'gx10-skipped' : (fields > 0 ? 'gx10-active' : 'gx10-clean');
+  const label = skipped
+    ? 'GX10 unreachable — passthrough'
+    : fields > 0
+      ? `GX10 redacted ${fields} field${fields === 1 ? '' : 's'} across ${sources.length} source${sources.length === 1 ? '' : 's'}`
+      : `GX10 verified ${docs} doc${docs === 1 ? '' : 's'} — no redaction needed`;
+  return (
+    <div className={`gx10-banner ${tone}`}>
+      <button className="gx10-chip" onClick={() => setOpen(o => !o)} aria-expanded={open}>
+        <span className="gx10-shield" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+        </span>
+        <span className="gx10-label">{label}</span>
+        <span className="gx10-meta tabular">
+          {!skipped && <>edge → cloud: {sentToCloud}/{docs}</>}
+        </span>
+        <span className="gx10-caret">{open ? '−' : '+'}</span>
+      </button>
+      {open && (
+        <div className="gx10-detail">
+          {skipped && (
+            <div className="gx10-warn">
+              GX10 endpoint was unreachable; documents passed through unredacted.
+              Configure <code>GX10_BASE_URL</code> or set <code>GX10_ENABLED=false</code>.
+            </div>
+          )}
+          {!skipped && sources.length === 0 && (
+            <div className="gx10-empty">No sensitive fields detected in this batch.</div>
+          )}
+          {sources.length > 0 && (
+            <table className="gx10-table">
+              <thead>
+                <tr>
+                  <th>Source</th><th>Type</th><th>Owner</th>
+                  <th className="num">Fields</th><th>Reasons</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sources.map(s => (
+                  <tr key={s.source_id}>
+                    <td className="mono">{s.source_id}</td>
+                    <td><span className={`gx10-tag type-${s.source_type}`}>{s.source_type}</span></td>
+                    <td>{s.owner}</td>
+                    <td className="num tabular">{s.redactions}</td>
+                    <td>
+                      {(s.reasons || []).map((r, i) => (
+                        <span key={i} className="gx10-reason">{r}</span>
+                      ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div className="gx10-foot">Ran on ASUS GX10 · trust layer {gx10.status}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BriefResult({ brief }) {
   const roles = brief.role_statuses || [];
   const passports = brief.evidence_passports || [];
+  const redactedSet = new Set((brief.gx10?.redacted_sources || []).map(s => s.source_id));
 
   return (
     <div className="brief-result">
+      <GX10TrustChip gx10={brief.gx10}/>
       {brief.escalation_required && (
         <div className="escalation pulse" role="alert">
           <div className="escalation-icon">!</div>
@@ -549,13 +622,33 @@ function BriefResult({ brief }) {
       )}
 
       <div className="brief-roles">
-        {roles.map(rs => (
+        {roles.map(rs => {
+          const roleSourceIds = new Set(
+            (rs.claims || []).flatMap(c => c.source_ids || [])
+          );
+          const redactedHere = (brief.gx10?.redacted_sources || [])
+            .filter(s => roleSourceIds.has(s.source_id) || (s.owner || '').toLowerCase() === (rs.role || '').toLowerCase());
+          const redactedFields = redactedHere.reduce((n, s) => n + (s.redactions || 0), 0);
+          return (
           <div key={rs.role} className={`brief-role team-${rs.role}`}>
             <div className="brief-role-head">
               <TeamBadge team={rs.role}/>
               <StatusPill status={rs.status}/>
               <span className="brief-conf">{Math.round((rs.confidence || 0) * 100)}%</span>
               {rs.mode === 'seeded' && <span className="status-pill stub"><span className="dot"/>seeded</span>}
+              {redactedFields > 0 && (
+                <span
+                  className="gx10-source-chip"
+                  title={`Redacted by GX10: ${redactedHere.map(s => `${s.source_id} (${s.redactions})`).join(', ')}`}
+                >
+                  <span className="gx10-shield" aria-hidden="true">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                    </svg>
+                  </span>
+                  Redacted by GX10 · {redactedFields}
+                </span>
+              )}
             </div>
             <p className="brief-role-summary">{rs.summary}</p>
             {rs.blockers && rs.blockers.length > 0 && (
@@ -564,7 +657,8 @@ function BriefResult({ brief }) {
               </ul>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {passports.length > 0 && (

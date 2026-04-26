@@ -808,6 +808,43 @@ async def approve_action(ctx: Context, req: ApproveRequest) -> ApproveResponse:
             f"Action approved | id={req.action_id} | type={action_type} | "
             f"approver={req.approver} | success={success}"
         )
+
+        # Proactive notifications — high-signal events only
+        if success and action_type == "schedule_meeting":
+            attendees = payload.get("attendees") or []
+            attendee_str = ", ".join(attendees[:3]) + (" +more" if len(attendees) > 3 else "")
+            link = payload.get("calendar_html_link") or ""
+            _emit_notification(
+                kind="meeting.created",
+                title=f"Sync scheduled: {payload.get('title') or 'StandIn meeting'}",
+                body=f"Attendees: {attendee_str or 'TBD'}" + (f"\n{link}" if link else ""),
+                severity="success",
+                action_id=req.action_id,
+                team=doc.get("team"),
+                owner=doc.get("owner"),
+                extra={"calendar_html_link": link, "calendar_event_id": payload.get("calendar_event_id")},
+            )
+        elif success:
+            _emit_notification(
+                kind="action.executed",
+                title=f"{action_type.replace('_', ' ').title()} delivered",
+                body=(doc.get("title") or result or "")[:300],
+                severity="success",
+                action_id=req.action_id,
+                team=doc.get("team"),
+                owner=doc.get("owner"),
+            )
+        else:
+            _emit_notification(
+                kind="action.failed",
+                title=f"{action_type.replace('_', ' ').title()} failed",
+                body=(result or "Action handler reported failure.")[:300],
+                severity="warning",
+                action_id=req.action_id,
+                team=doc.get("team"),
+                owner=doc.get("owner"),
+            )
+
         return ApproveResponse(
             action_id=req.action_id, action_type=action_type,
             approved=success, result=result,
@@ -833,6 +870,19 @@ async def reject_action(ctx: Context, req: RejectRequest) -> RejectResponse:
         )
         ctx.logger.info(
             f"Action rejected | id={req.action_id} | reason={req.reason}"
+        )
+        try:
+            rdoc = db["pending_approvals"].find_one({"action_id": req.action_id}) or {}
+        except Exception:
+            rdoc = {}
+        _emit_notification(
+            kind="action.rejected",
+            title=f"Action rejected: {rdoc.get('title') or req.action_id[:18]}",
+            body=req.reason or "No reason given.",
+            severity="info",
+            action_id=req.action_id,
+            team=rdoc.get("team"),
+            owner=rdoc.get("owner"),
         )
         return RejectResponse(action_id=req.action_id, rejected=True)
     except Exception as exc:
@@ -1055,6 +1105,18 @@ async def submit_action(ctx: Context, req: _ActionSubmitRest) -> _ActionSubmitRe
         )
     pending = (resp.result or "").lower().startswith("pending_approval") or \
               (req.action_type in _APPROVAL_REQUIRED)
+
+    if pending and (req.priority or "").lower() == "urgent":
+        _emit_notification(
+            kind="escalation.opened",
+            title=f"Escalation queued: {req.title or req.action_type}",
+            body=req.summary or "Awaiting agent resolution.",
+            severity="critical",
+            action_id=resp.action_id,
+            team=req.team,
+            owner=req.owner,
+        )
+
     return _ActionSubmitRestResponse(
         action_id=resp.action_id,
         action_type=resp.action_type,
@@ -1096,6 +1158,59 @@ async def get_log(ctx: Context) -> FeedResponse:
     except Exception as exc:
         ctx.logger.warning(f"log endpoint failed: {exc}")
         return FeedResponse(entries=[], source="fallback")
+
+
+# ---------------------------------------------------------------------------
+# Notifications — proactive feed of high-signal events for the dashboard
+# ---------------------------------------------------------------------------
+#
+# Anything worth interrupting the user about goes here: a meeting got booked,
+# an agent conversation resolved, an escalation opened, a watchdog flagged a
+# status change. We persist to standin.notifications so the bell icon can
+# backfill on page load, and the UI cursor-polls /notifications/list every
+# few seconds for live arrivals.
+
+_NOTIFICATIONS_COLL = "notifications"
+
+
+def _emit_notification(
+    kind: str,
+    title: str,
+    body: str = "",
+    severity: str = "info",          # 'info' | 'success' | 'warning' | 'critical'
+    action_id: str | None = None,
+    conversation_id: str | None = None,
+    owner: str | None = None,
+    team: str | None = None,
+    extra: dict | None = None,
+) -> str | None:
+    """Insert a notification row. Safe no-op when MongoDB is unavailable."""
+    if not _MONGODB_URI:
+        return None
+    note_id = f"note-{uuid.uuid4().hex[:10]}"
+    doc = {
+        "id": note_id,
+        "ts": datetime.now(UTC).isoformat(),
+        "kind": kind,
+        "severity": severity,
+        "title": title[:160],
+        "body": (body or "")[:480],
+        "action_id": action_id,
+        "conversation_id": conversation_id,
+        "owner": owner,
+        "team": team,
+        "extra": extra or {},
+        "read": False,
+    }
+    try:
+        db = _get_db()
+        db[_NOTIFICATIONS_COLL].insert_one(dict(doc))
+        # Mongo mutates the dict (adds _id) — strip it before logging
+        _LOGGER.info(f"notify | {kind} | {severity} | {title[:80]}")
+        return note_id
+    except Exception as exc:
+        _LOGGER.warning(f"notify failed ({kind}): {exc}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1305,6 +1420,7 @@ async def _run_conversation(conversation_id: str, script: list[dict], action_id:
 
     # Mark resolved + approve underlying pending action (if any)
     try:
+        conv_doc = coll.find_one({"conversation_id": conversation_id}, {"_id": 0})
         coll.update_one(
             {"conversation_id": conversation_id},
             {"$set": {"status": "resolved", "updated_at": _conv_now()}},
@@ -1315,6 +1431,18 @@ async def _run_conversation(conversation_id: str, script: list[dict], action_id:
                 {"$set": {"status": "approved", "approved_at": _conv_now(),
                           "approved_by": "agent_conversation"}},
             )
+        topic = (conv_doc or {}).get("topic") or "ticket"
+        action_type = (conv_doc or {}).get("action_type") or ""
+        _emit_notification(
+            kind="conversation.resolved",
+            title=f"Agents resolved: {topic}",
+            body=f"Cross-agent conversation reached a decision via {action_type or 'agent_handoff'}.",
+            severity="success",
+            action_id=action_id,
+            conversation_id=conversation_id,
+            team=(conv_doc or {}).get("team"),
+            owner=(conv_doc or {}).get("owner"),
+        )
     except Exception as exc:
         _LOGGER.warning(f"conversation finalize failed: {exc}")
 
@@ -1471,6 +1599,114 @@ async def get_conversation(ctx: Context, req: _ConvGetReq) -> _ConvState:
             topic="", status="failed", started_at="", updated_at="",
             participants=[], messages=[],
         )
+
+
+# ---------------------------------------------------------------------------
+# Notifications — REST endpoints
+# ---------------------------------------------------------------------------
+
+
+class _NotificationItem(Model):
+    id: str
+    ts: str
+    kind: str
+    severity: str
+    title: str
+    body: str
+    action_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    owner: Optional[str] = None
+    team: Optional[str] = None
+    read: bool = False
+
+
+class _NotifListReq(Model):
+    since: Optional[str] = None  # ISO timestamp; only newer than this
+    limit: int = 30
+    include_read: bool = True
+
+
+class _NotifListResp(Model):
+    notifications: List[_NotificationItem]
+    unread_count: int
+    cursor: str  # latest ts in this batch (or echo `since` if empty)
+
+
+class _NotifMarkReadReq(Model):
+    ids: List[str] = []
+    all: bool = False
+
+
+class _NotifMarkReadResp(Model):
+    updated: int
+
+
+@agent.on_rest_post("/notifications/list", _NotifListReq, _NotifListResp)
+async def list_notifications(ctx: Context, req: _NotifListReq) -> _NotifListResp:
+    """Return notifications newer than `since` (ISO ts). Use returned `cursor`
+    for the next call to avoid duplicates. Falls back gracefully when Mongo
+    is unconfigured."""
+    if not _MONGODB_URI:
+        return _NotifListResp(notifications=[], unread_count=0, cursor=req.since or "")
+    try:
+        db = _get_db()
+        coll = db[_NOTIFICATIONS_COLL]
+
+        query: dict = {}
+        if req.since:
+            query["ts"] = {"$gt": req.since}
+        if not req.include_read:
+            query["read"] = False
+
+        limit = max(1, min(int(req.limit or 30), 100))
+        docs = list(
+            coll.find(query, {"_id": 0})
+                .sort("ts", -1)
+                .limit(limit)
+        )
+
+        items = [
+            _NotificationItem(
+                id=d.get("id", ""),
+                ts=d.get("ts", ""),
+                kind=d.get("kind", "unknown"),
+                severity=d.get("severity", "info"),
+                title=d.get("title", ""),
+                body=d.get("body", ""),
+                action_id=d.get("action_id"),
+                conversation_id=d.get("conversation_id"),
+                owner=d.get("owner"),
+                team=d.get("team"),
+                read=bool(d.get("read", False)),
+            )
+            for d in docs
+        ]
+        unread_count = coll.count_documents({"read": False})
+        cursor = items[0].ts if items else (req.since or "")
+        return _NotifListResp(notifications=items, unread_count=unread_count, cursor=cursor)
+    except Exception as exc:
+        ctx.logger.warning(f"list_notifications failed: {exc}")
+        return _NotifListResp(notifications=[], unread_count=0, cursor=req.since or "")
+
+
+@agent.on_rest_post("/notifications/mark_read", _NotifMarkReadReq, _NotifMarkReadResp)
+async def mark_notifications_read(ctx: Context, req: _NotifMarkReadReq) -> _NotifMarkReadResp:
+    """Mark specific notifications (or all) as read."""
+    if not _MONGODB_URI:
+        return _NotifMarkReadResp(updated=0)
+    try:
+        db = _get_db()
+        coll = db[_NOTIFICATIONS_COLL]
+        if req.all:
+            res = coll.update_many({"read": False}, {"$set": {"read": True}})
+        elif req.ids:
+            res = coll.update_many({"id": {"$in": list(req.ids)}}, {"$set": {"read": True}})
+        else:
+            return _NotifMarkReadResp(updated=0)
+        return _NotifMarkReadResp(updated=int(getattr(res, "modified_count", 0)))
+    except Exception as exc:
+        ctx.logger.warning(f"mark_notifications_read failed: {exc}")
+        return _NotifMarkReadResp(updated=0)
 
 
 # ---------------------------------------------------------------------------

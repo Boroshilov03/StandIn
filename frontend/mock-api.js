@@ -106,6 +106,13 @@ window.MOCK_API = (() => {
   // Backend action_log is merged in via _refreshFeed().
   let _feed = [];
 
+  // ── Notifications (live, cursor-polled) ────────────────────────────────
+  let _notifications  = [];   // newest first
+  let _notifCursor    = null; // ISO ts of most recent seen notification
+  let _notifUnread    = 0;
+  let _notifListeners = [];   // (notifs, unread, justArrived) => void
+  let _firstNotifPoll = true;
+
   let _healthState = {
     status:     { online: true,  Gemini: true,  MongoDB: true  },
     perform:    { online: true,  Gemini: true,  MongoDB: true  },
@@ -294,12 +301,40 @@ window.MOCK_API = (() => {
     }
   }
 
+  async function _refreshNotifications() {
+    try {
+      const body = { limit: 30, include_read: true };
+      if (_notifCursor) body.since = _notifCursor;
+      const data = await _post(`${BASE.perform}/notifications/list`, body);
+      const items = Array.isArray(data?.notifications) ? data.notifications : [];
+      const arrivals = [];
+      if (items.length > 0) {
+        // Backend returns newest-first; merge avoiding dupes by id.
+        const known = new Set(_notifications.map(n => n.id));
+        for (const n of items) {
+          if (!known.has(n.id)) {
+            _notifications.unshift(n);
+            arrivals.push(n);
+          }
+        }
+        _notifications = _notifications.slice(0, 80);
+        if (data.cursor) _notifCursor = data.cursor;
+        else _notifCursor = items[0].ts;
+      }
+      if (typeof data?.unread_count === 'number') _notifUnread = data.unread_count;
+      const justArrived = _firstNotifPoll ? [] : arrivals;
+      _firstNotifPoll = false;
+      _notifListeners.forEach(fn => { try { fn(_notifications.slice(), _notifUnread, justArrived); } catch (_) {} });
+    } catch (_) { /* keep state */ }
+  }
+
   // Initial fetch + polling
-  Promise.all([_refreshApprovals(), _refreshGraph(), _refreshHealth(), _refreshFeed()]);
-  setInterval(_refreshApprovals, 5000);
-  setInterval(_refreshGraph,     30000);
-  setInterval(_refreshHealth,    8000);
-  setInterval(_refreshFeed,      10000);
+  Promise.all([_refreshApprovals(), _refreshGraph(), _refreshHealth(), _refreshFeed(), _refreshNotifications()]);
+  setInterval(_refreshApprovals,     5000);
+  setInterval(_refreshGraph,         30000);
+  setInterval(_refreshHealth,        8000);
+  setInterval(_refreshFeed,          10000);
+  setInterval(_refreshNotifications, 2500);
 
   // ── Local feed helper ───────────────────────────────────────────────────
 
@@ -483,6 +518,31 @@ window.MOCK_API = (() => {
     },
 
     getLiveTrace: () => _liveTrace,
+
+    // ── Notifications ────────────────────────────────────────────────────
+    listNotifications: () => _notifications.slice(),
+    unreadNotifications: () => _notifUnread,
+    onNotifications: (fn) => {
+      if (typeof fn !== 'function') return () => {};
+      _notifListeners.push(fn);
+      // Fire once with current snapshot so subscribers render immediately.
+      try { fn(_notifications.slice(), _notifUnread, []); } catch (_) {}
+      return () => { _notifListeners = _notifListeners.filter(x => x !== fn); };
+    },
+    markNotificationsRead: async (ids) => {
+      const idArr = Array.isArray(ids) ? ids : [ids].filter(Boolean);
+      if (idArr.length === 0) return;
+      _notifications = _notifications.map(n => idArr.includes(n.id) ? { ...n, read: true } : n);
+      _notifUnread = Math.max(0, _notifUnread - idArr.length);
+      _notifListeners.forEach(fn => { try { fn(_notifications.slice(), _notifUnread, []); } catch (_) {} });
+      try { await _post(`${BASE.perform}/notifications/mark_read`, { ids: idArr, all: false }); } catch (_) {}
+    },
+    markAllNotificationsRead: async () => {
+      _notifications = _notifications.map(n => ({ ...n, read: true }));
+      _notifUnread = 0;
+      _notifListeners.forEach(fn => { try { fn(_notifications.slice(), _notifUnread, []); } catch (_) {} });
+      try { await _post(`${BASE.perform}/notifications/mark_read`, { all: true }); } catch (_) {}
+    },
 
     // ── Brief & RAG HTTP endpoints ────────────────────────────────────────
 

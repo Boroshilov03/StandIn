@@ -21,6 +21,8 @@ from models import (
     EvidencePassport,
     FullBriefRequest,
     FullBriefResponse,
+    GX10RedactedSource,
+    GX10TrustMeta,
     MeetingResponse,
     VerifyRequest,
     VerifyResponse,
@@ -987,6 +989,28 @@ def _redact_raw_via_gx10(role: str, raw: dict, workflow_id: str) -> tuple[dict, 
     trust = gx10_client.redact_documents(workflow_id, docs)
     by_id = {d["id"]: d["content"] for d in trust.get("redactedDocuments", [])}
 
+    # Build a per-source breakdown so the UI can show which sources were touched
+    # and why. Aggregates the GX10 redactionLog (one entry per redacted field)
+    # back to source-level counts using the docs we sent.
+    source_meta_by_id = {d["id"]: {"type": d["type"], "owner": d["owner"]} for d in docs}
+    breakdown: dict[str, dict] = {}
+    for entry in trust.get("redactionLog", []):
+        sid = entry.get("documentId", "")
+        if not sid:
+            continue
+        bucket = breakdown.setdefault(sid, {
+            "source_id": sid,
+            "source_type": source_meta_by_id.get(sid, {}).get("type", "unknown"),
+            "owner": source_meta_by_id.get(sid, {}).get("owner", role),
+            "redactions": 0,
+            "reasons": [],
+        })
+        bucket["redactions"] += 1
+        reason = entry.get("reason") or entry.get("type") or ""
+        if reason and reason not in bucket["reasons"]:
+            bucket["reasons"].append(reason)
+    trust["_sources_breakdown"] = list(breakdown.values())
+
     redacted = dict(raw)
     redacted["slack_messages"] = [
         {**m, "content": by_id.get(m.get("source_id", ""), m.get("content", ""))}
@@ -1003,97 +1027,57 @@ def _redact_raw_via_gx10(role: str, raw: dict, workflow_id: str) -> tuple[dict, 
     return redacted, trust
 
 
-_MULTI_SYNTHESIS_TMPL = """\
-You are synthesising status reports for {n} roles in a single pass: {roles_csv}.
+def _summarize_trust_metas(metas: list[dict]) -> GX10TrustMeta:
+    """Aggregate per-role GX10 trust meta dicts into a single response-level
+    summary suitable for surfacing in the dashboard."""
+    docs_processed = 0
+    fields_redacted = 0
+    raw_to_cloud = 0
+    overall_status = "passed"
+    seen_sources: dict[str, dict] = {}
 
-Each role has its own gathered raw_data block. Cross-reference the four sources
-(slack_messages, jira_tickets, seed_docs, calendar) within each role; you may
-also use signals from one role's data to corroborate or contradict another's.
+    for m in metas:
+        if not isinstance(m, dict):
+            continue
+        docs_processed   += int(m.get("documentsProcessed", 0) or 0)
+        fields_redacted  += int(m.get("sensitiveFieldsRedacted", 0) or 0)
+        raw_to_cloud     += int(m.get("rawDocumentsSentToCloud", 0) or 0)
+        if (m.get("trustLayerStatus") or "").lower() == "skipped":
+            overall_status = "skipped"
+        for src in m.get("_sources_breakdown", []) or []:
+            sid = src.get("source_id", "")
+            if not sid:
+                continue
+            existing = seen_sources.get(sid)
+            if existing:
+                existing["redactions"] += int(src.get("redactions", 0))
+                for r in src.get("reasons", []) or []:
+                    if r not in existing["reasons"]:
+                        existing["reasons"].append(r)
+            else:
+                seen_sources[sid] = {
+                    "source_id":   sid,
+                    "source_type": src.get("source_type", "unknown"),
+                    "owner":       src.get("owner", ""),
+                    "redactions":  int(src.get("redactions", 0)),
+                    "reasons":     list(src.get("reasons", []) or []),
+                }
 
-Return ONLY valid JSON in this exact shape — no markdown, no extra keys:
-{{
-  "roles": {{
-    "<role_name>": {{
-      "summary": "<one paragraph>",
-      "blockers": ["<blocker string>", ...],
-      "claims": [
-        {{"claim": "<single factual statement>", "source_ids": ["<id>", ...], "confidence": <0.0-1.0>, "risk": "<high|medium|low>"}}
-      ]
-    }},
-    ...
-  }}
-}}
-
-The "roles" object MUST contain one key per role listed above, spelled exactly.
-
-Per-role raw data and analyst lens:
-{role_blocks}
-"""
-
-
-async def _synthesize_all_roles(
-    roles: list[str], raw_data: dict[str, dict], workflow_id: str = "unknown"
-) -> dict[str, dict] | None:
-    """One Gemini call for all roles. Returns {role: synth_dict}; None on failure."""
-    if not _GEMINI_KEY or not roles:
-        return None
-    try:
-        from google.genai import types as gt
-
-        # GX10 redaction per role (cheap; runs locally)
-        redacted_per_role: dict[str, dict] = {}
-        for role in roles:
-            redacted_raw, trust_meta = _redact_raw_via_gx10(role, raw_data[role], workflow_id)
-            _LOGGER.info(
-                "GX10 redaction for %s | status=%s | redacted=%d fields | sentToCloud=%d docs",
-                role,
-                trust_meta.get("trustLayerStatus"),
-                trust_meta.get("sensitiveFieldsRedacted", 0),
-                trust_meta.get("rawDocumentsSentToCloud", 0),
-            )
-            redacted_per_role[role] = redacted_raw
-
-        role_blocks_parts: list[str] = []
-        for role in roles:
-            r = redacted_per_role[role]
-            role_blocks_parts.append(
-                f"=== ROLE: {role} ===\n"
-                f"lens: {r.get('lens', '')}\n"
-                f"raw_data: {json.dumps({k: v for k, v in r.items() if k != 'lens'}, default=str)}\n"
-            )
-
-        prompt = _MULTI_SYNTHESIS_TMPL.format(
-            n=len(roles),
-            roles_csv=", ".join(roles),
-            role_blocks="\n".join(role_blocks_parts),
-        )
-
-        client = _get_gemini_client()
-        resp = await client.aio.models.generate_content(
-            model=_GEMINI_MODEL,
-            contents=prompt,
-            config=gt.GenerateContentConfig(
-                system_instruction=_SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                thinking_config=gt.ThinkingConfig(thinking_budget=0),
-            ),
-        )
-        parsed = json.loads(resp.text)
-        roles_out = parsed.get("roles") or {}
-        if not isinstance(roles_out, dict):
-            return None
-        validated: dict[str, dict] = {}
-        for role in roles:
-            entry = roles_out.get(role)
-            if isinstance(entry, dict):
-                validated[role] = _validate_synthesis(entry)
-        return validated or None
-    except Exception as exc:
-        _LOGGER.warning(f"Gemini multi-role synthesis failed: {exc}")
-        return None
+    return GX10TrustMeta(
+        status=overall_status,
+        documents_processed=docs_processed,
+        sensitive_fields_redacted=fields_redacted,
+        raw_documents_sent_to_cloud=raw_to_cloud,
+        redacted_sources=[
+            GX10RedactedSource(**s) for s in seen_sources.values()
+        ],
+    )
 
 
-async def _synthesize_role(role: str, raw: dict, workflow_id: str = "unknown") -> dict | None:
+async def _synthesize_role(
+    role: str, raw: dict, workflow_id: str = "unknown",
+    trust_metas: list[dict] | None = None,
+) -> dict | None:
     if not _GEMINI_KEY:
         return None
     try:
@@ -1109,6 +1093,8 @@ async def _synthesize_role(role: str, raw: dict, workflow_id: str = "unknown") -
             trust_meta.get("sensitiveFieldsRedacted", 0),
             trust_meta.get("rawDocumentsSentToCloud", 0),
         )
+        if trust_metas is not None:
+            trust_metas.append(trust_meta)
 
         client = _get_gemini_client()
         prompt = _SYNTHESIS_TMPL.format(
@@ -1529,7 +1515,8 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
     # One generate_content covers every role. Massive latency win vs N
     # parallel calls because we only pay one round-trip + one cold start.
     t2 = time.monotonic()
-    multi = await _synthesize_all_roles(roles, raw_data, workflow_id=msg.request_id)
+    trust_metas: list[dict] = []
+    multi = await _synthesize_all_roles(roles, raw_data, workflow_id=msg.request_id, trust_metas=trust_metas)
 
     synth_results: list[dict | None] = []
     missing_roles: list[str] = []
@@ -1546,7 +1533,7 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
     # Fallback: any roles the single call dropped → fill via per-role calls in parallel
     if missing_roles:
         ctx.logger.warning(f"Multi-synthesis missing {len(missing_roles)} role(s); per-role fallback: {missing_roles}")
-        fb_tasks = [_synthesize_role(r, raw_data[r], workflow_id=msg.request_id) for r in missing_roles]
+        fb_tasks = [_synthesize_role(r, raw_data[r], workflow_id=msg.request_id, trust_metas=trust_metas) for r in missing_roles]
         fb_out = await asyncio.gather(*fb_tasks, return_exceptions=True)
         fb_map = {r: (None if isinstance(o, Exception) else o) for r, o in zip(missing_roles, fb_out)}
         synth_results = [synth_results[i] or fb_map.get(roles[i]) for i in range(len(roles))]
@@ -1635,6 +1622,8 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
 
     t_total_ms = int((time.monotonic() - t_start) * 1000)
 
+    gx10_meta = _summarize_trust_metas(trust_metas) if trust_metas else None
+
     brief = FullBriefResponse(
         request_id=msg.request_id,
         user_email=msg.user_email,
@@ -1650,6 +1639,7 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
         mode=mode,
         session_id=session_id,
         delta_claims=deltas if deltas else None,
+        gx10=gx10_meta,
     )
 
     # ── Persist brief to history (fire-and-forget) ────────────────────────

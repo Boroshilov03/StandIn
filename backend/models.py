@@ -189,6 +189,22 @@ class RAGResponse(Model):
     retrieval_method: str   # "vector_search" | "keyword" | "no_results"
 
 
+class GX10RedactedSource(Model):
+    source_id: str            # e.g. "msg_eng_api_change", "NOVA-142", "doc_seed_5"
+    source_type: str          # "slack" | "jira" | "seed_doc"
+    owner: str                # role / team that owns the source
+    redactions: int           # count of fields redacted in that source
+    reasons: List[str] = []   # short reason labels (e.g. "api_key", "email")
+
+
+class GX10TrustMeta(Model):
+    status: str                                # "passed" | "skipped"
+    documents_processed: int
+    sensitive_fields_redacted: int
+    raw_documents_sent_to_cloud: int
+    redacted_sources: List[GX10RedactedSource] = []
+
+
 class FullBriefResponse(Model):
     request_id: str
     user_email: str
@@ -208,6 +224,7 @@ class FullBriefResponse(Model):
     mode: Optional[str] = "live"
     session_id: Optional[str] = None        # echo back in next FullBriefRequest
     delta_claims: Optional[List[str]] = None  # what changed since last brief
+    gx10: Optional[GX10TrustMeta] = None     # edge trust layer summary
 
 
 # ---------------------------------------------------------------------------

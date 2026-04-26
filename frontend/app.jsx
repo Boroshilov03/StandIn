@@ -1,5 +1,168 @@
 // StandIn — App shell: nav, health bar, route switcher, tweaks integration.
 
+const NOTIF_KIND_META = {
+  'conversation.resolved': { icon: '✓', tone: 'tone-success', label: 'Resolved' },
+  'meeting.created':       { icon: '📅', tone: 'tone-info',    label: 'Meeting' },
+  'action.executed':       { icon: '⚡', tone: 'tone-success', label: 'Action' },
+  'action.failed':         { icon: '⚠', tone: 'tone-warn',    label: 'Failed' },
+  'action.rejected':       { icon: '✕', tone: 'tone-muted',   label: 'Rejected' },
+  'escalation.opened':     { icon: '!',  tone: 'tone-critical', label: 'Escalation' },
+};
+
+function _notifMeta(kind) {
+  return NOTIF_KIND_META[kind] || { icon: '•', tone: 'tone-info', label: 'Update' };
+}
+
+function _fmtNotifTime(ts) {
+  if (!ts) return '';
+  try {
+    const d = new Date(ts);
+    const diffMs = Date.now() - d.getTime();
+    const sec = Math.floor(diffMs / 1000);
+    if (sec < 60) return `${sec}s ago`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    return d.toLocaleDateString();
+  } catch (_) { return ''; }
+}
+
+function NotificationToast({ notif, onDismiss }) {
+  useEffect(() => {
+    const t = setTimeout(onDismiss, 5200);
+    return () => clearTimeout(t);
+  }, [notif?.id]);
+  if (!notif) return null;
+  const meta = _notifMeta(notif.kind);
+  return (
+    <div className={`notif-toast ${meta.tone}`} role="status" onClick={onDismiss}>
+      <span className="notif-toast-icon">{meta.icon}</span>
+      <div className="notif-toast-body">
+        <div className="notif-toast-title">{notif.title}</div>
+        <div className="notif-toast-text">{notif.body}</div>
+      </div>
+    </div>
+  );
+}
+
+function NotificationBell() {
+  const [items,   setItems]   = useState(() => window.MOCK_API.listNotifications());
+  const [unread,  setUnread]  = useState(() => window.MOCK_API.unreadNotifications());
+  const [open,    setOpen]    = useState(false);
+  const [toasts,  setToasts]  = useState([]);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const off = window.MOCK_API.onNotifications((n, u, justArrived) => {
+      setItems(n);
+      setUnread(u);
+      if (justArrived && justArrived.length > 0) {
+        // Show up to 3 newest as toasts.
+        setToasts(prev => [...justArrived.slice(0, 3), ...prev].slice(0, 3));
+      }
+    });
+    return off;
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    function onClick(e) {
+      if (!ref.current) return;
+      if (ref.current.contains(e.target)) return;
+      // Dropdown is portaled to body — exclude it from outside-click detection.
+      if (e.target.closest && e.target.closest('.notif-dropdown')) return;
+      setOpen(false);
+    }
+    function onKey(e) { if (e.key === 'Escape') setOpen(false); }
+    window.addEventListener('mousedown', onClick);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onClick);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  function dismissToast(id) {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }
+
+  function handleItemClick(n) {
+    if (!n.read) window.MOCK_API.markNotificationsRead([n.id]);
+  }
+
+  function handleMarkAll() {
+    window.MOCK_API.markAllNotificationsRead();
+  }
+
+  return (
+    <>
+      <div className="notif-bell-wrap" ref={ref}>
+        <button
+          className={`notif-bell ${unread > 0 ? 'has-unread' : ''}`}
+          onClick={() => setOpen(o => !o)}
+          aria-label={`Notifications${unread > 0 ? ` (${unread} unread)` : ''}`}
+          aria-expanded={open}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+          </svg>
+          {unread > 0 && <span className="notif-badge tabular">{unread > 99 ? '99+' : unread}</span>}
+        </button>
+        {open && ReactDOM.createPortal(
+          <div className="notif-dropdown" role="dialog" aria-label="Notifications" ref={(el) => { if (el) el.dataset.portal = '1'; }}>
+            <div className="notif-dropdown-head">
+              <span className="notif-dropdown-title">Activity</span>
+              {unread > 0 && (
+                <button className="notif-mark-all" onClick={handleMarkAll}>Mark all read</button>
+              )}
+            </div>
+            <div className="notif-dropdown-list">
+              {items.length === 0 && (
+                <div className="notif-empty">No notifications yet.</div>
+              )}
+              {items.map(n => {
+                const meta = _notifMeta(n.kind);
+                return (
+                  <div
+                    key={n.id}
+                    className={`notif-item ${meta.tone} ${n.read ? '' : 'is-unread'}`}
+                    onClick={() => handleItemClick(n)}
+                  >
+                    <span className="notif-item-icon">{meta.icon}</span>
+                    <div className="notif-item-body">
+                      <div className="notif-item-row">
+                        <span className="notif-item-title">{n.title}</span>
+                        <span className="notif-item-time">{_fmtNotifTime(n.ts)}</span>
+                      </div>
+                      <div className="notif-item-text">{n.body}</div>
+                      <div className="notif-item-meta">
+                        <span className={`notif-item-kind ${meta.tone}`}>{meta.label}</span>
+                        {n.team && <span className="notif-item-tag">{n.team}</span>}
+                        {n.owner && <span className="notif-item-tag muted">{n.owner}</span>}
+                      </div>
+                    </div>
+                    {!n.read && <span className="notif-item-dot" aria-label="unread"/>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>,
+          document.body
+        )}
+      </div>
+      {!open && (
+        <div className="notif-toast-stack" aria-live="polite">
+          {toasts.map(t => (
+            <NotificationToast key={t.id} notif={t} onDismiss={() => dismissToast(t.id)}/>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 function HealthBar({ route, setRoute, counts }) {
   useEffect(() => {
     const t = setInterval(() => window.MOCK_API.healthAgents(), 8000);
@@ -51,6 +214,7 @@ function HealthBar({ route, setRoute, counts }) {
         ))}
       </nav>
       <div className="healthbar-spacer"/>
+      <NotificationBell/>
       {statusClass !== 'demo' && (
         <div
           className={`system-status ${statusClass}`}
