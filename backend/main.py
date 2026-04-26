@@ -1,10 +1,19 @@
 """Run the StandIn agent topology with an ASI:One-facing orchestrator."""
 
 import asyncio
+import logging
 import os
 
 from uagents import Agent, Bureau
 from uagents_core.types import AgentInfo
+
+# Suppress noisy third-party loggers before any agents are imported
+logging.getLogger("google_genai").setLevel(logging.WARNING)
+logging.getLogger("google.genai").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("pymongo").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 try:
     asyncio.get_event_loop()
@@ -33,6 +42,7 @@ from agents.historical_agent.agent import agent as historical_agent
 from agents.orchestrator.agent import orchestrator
 from agents.perform_action.agent import agent as perform_action_agent
 from agents.status_agent.agent import agent as status_agent
+# from agents.watchdog_agent.agent import agent as watchdog_agent  # disabled
 
 BUREAU_PORT = int(os.getenv("BUREAU_PORT", "8000"))
 
@@ -71,7 +81,7 @@ def main():
     bureau.add(status_agent)
     bureau.add(historical_agent)
     bureau.add(perform_action_agent)
-    bureau.add(watchdog_agent)
+    # bureau.add(watchdog_agent)  # disabled
 
     print("\n=== StandIn Topology ===")
     print(f"  Bureau Port:      {BUREAU_PORT}")
@@ -80,7 +90,6 @@ def main():
     print(f"  Status Agent:    {status_agent.address}")
     print(f"  Historical:      {historical_agent.address}")
     print(f"  Perform Action:  {perform_action_agent.address}")
-    print(f"  Watchdog:        {watchdog_agent.address}")
     if agentverse_url:
         print(f"  Agentverse URL:   {agentverse_url}")
     print("========================\n")

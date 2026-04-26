@@ -24,6 +24,7 @@ import os
 import re
 import sys
 from datetime import datetime, timedelta, UTC
+import uuid
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -33,7 +34,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
-from data.company_data import CALENDAR, JIRA, SLACK, USERS
+from data_engineering.company_data import CALENDAR, JIRA, SLACK, USERS
 from models import RAGRequest, RAGResponse
 try:
     from services.calendar_service import list_events as list_calendar_events
@@ -51,12 +52,24 @@ _MONGODB_URI  = os.getenv("MONGODB_URI", "")
 _VECTOR_INDEX = os.getenv("VECTOR_INDEX_NAME", "standin_vector_index")
 _EMBED_MODEL  = "models/gemini-embedding-001"   # 768-dim
 
+# Gemini client — created once to reuse TCP/TLS connection across all calls
+_GEMINI_CLIENT = None
+
+
+def _get_gemini_client():
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is None and _GEMINI_KEY:
+        from google import genai
+        _GEMINI_CLIENT = genai.Client(api_key=_GEMINI_KEY)
+    return _GEMINI_CLIENT
+
+
 agent = Agent(
     name="historical_agent",
     seed=_SEED,
     port=_PORT,
-    mailbox=True,
-    publish_agent_details=True,
+    mailbox=False,
+    publish_agent_details=False,
 )
 
 _SYSTEM = (
@@ -83,9 +96,8 @@ def _get_db():
 
 
 async def _embed(text: str) -> list[float]:
-    from google import genai
     from google.genai import types
-    client = genai.Client(api_key=_GEMINI_KEY)
+    client = _get_gemini_client()
     result = await client.aio.models.embed_content(
         model=_EMBED_MODEL,
         contents=text,
@@ -271,10 +283,9 @@ async def _synthesize(
         "If the context does not contain the answer, say so clearly."
     )
 
-    from google import genai
     from google.genai import types as gt
 
-    client = genai.Client(api_key=_GEMINI_KEY)
+    client = _get_gemini_client()
     resp = await client.aio.models.generate_content(
         model=_GEMINI_MODEL,
         contents=prompt,
@@ -298,7 +309,7 @@ def _build_seed_cache() -> list[dict]:
 
     # 12 seed JSON files
     seed_dir = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "data", "seed")
+        os.path.join(os.path.dirname(__file__), "..", "..", "data_engineering", "seed")
     )
     for path in glob.glob(os.path.join(seed_dir, "*.json")):
         try:
@@ -494,6 +505,48 @@ async def health(ctx: Context) -> _HealthResponse:
         docs_loaded=len(_SEED_DOCS),
         gemini="configured" if _GEMINI_KEY else "not configured",
         timestamp=datetime.now(UTC).isoformat(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# HTTP ask endpoint — lets the frontend query the RAG pipeline directly
+# ---------------------------------------------------------------------------
+
+class _AskRequest(Model):
+    question: str
+    top_k: int = 5
+
+
+@agent.on_rest_post("/ask", _AskRequest, RAGResponse)
+async def http_ask(ctx: Context, req: _AskRequest) -> RAGResponse:
+    top_k = max(1, min(req.top_k, 20))
+    docs: list[dict] = []
+    retrieval_method = "no_results"
+
+    if _MONGODB_URI and _GEMINI_KEY:
+        try:
+            docs = await _vector_search(req.question, None, top_k)
+            if docs:
+                retrieval_method = "vector_search"
+                ctx.logger.info(f"http_ask vector search: {len(docs)} docs")
+        except Exception as exc:
+            ctx.logger.warning(f"http_ask vector search failed: {exc}")
+
+    if not docs:
+        docs = _keyword_search(req.question, None, top_k)
+        if docs:
+            retrieval_method = "keyword"
+
+    answer, confidence = await _synthesize(req.question, docs, retrieval_method)
+    source_ids = [d.get("id", "?") for d in docs]
+
+    return RAGResponse(
+        request_id=str(uuid.uuid4()),
+        question=req.question,
+        answer=answer,
+        source_ids=source_ids,
+        confidence=confidence,
+        retrieval_method=retrieval_method,
     )
 
 

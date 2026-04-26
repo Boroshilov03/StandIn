@@ -33,12 +33,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
-from data.company_data import CALENDAR, JIRA, SLACK, USERS
+from data_engineering.company_data import CALENDAR, JIRA, SLACK, USERS
 from models import (
     ActionRequest,
     ActionResponse,
     ApproveRequest,
     ApproveResponse,
+    FeedEntry,
+    FeedResponse,
     GraphEdge,
     GraphNode,
     GraphResponse,
@@ -57,7 +59,7 @@ try:
     from services.calendar_service import add_reminder as add_calendar_reminder
     from services.calendar_service import get_event as get_calendar_event
     from services.calendar_service import list_events as list_calendar_events
-    from services.slackService import postAsUser
+    from services.slackService import postAsUser, postAsBot
 except Exception:
     create_event = None
     add_calendar_reminder = None
@@ -77,8 +79,8 @@ agent = Agent(
     name="perform_action",
     seed=_SEED,
     port=_PORT,
-    mailbox=True,
-    publish_agent_details=True,
+    mailbox=False,
+    publish_agent_details=False,
 )
 
 
@@ -238,16 +240,33 @@ async def _action_send_slack(action_id: str, payload: dict, priority: str) -> tu
 
 async def _action_draft_slack(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
     """
-    STUB — mcp__claude_ai_Slack__slack_send_message_draft
-    Connect: call slack_send_message_draft(channel=..., text=...).
-    Useful for escalation notices that need human approval before sending.
+    Post a draft/automated Slack message as the StandIn bot (no human approval gate).
+    Used for watchdog alerts and escalation notices.
 
-    payload: { channel: str, text: str }
+    payload: { text: str, channel?: str }
     """
-    channel = payload.get("channel", "#general")
-    _LOGGER.info(f"[STUB] draft_slack | channel={channel} — Slack MCP not connected")
-    result = f"[stub] Slack draft for {channel} created (pending approval)."
-    return True, result, True
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return False, "draft_slack requires non-empty payload.text", False
+
+    raw_ch = payload.get("channel")
+    channel_key = raw_ch.strip() if isinstance(raw_ch, str) else None
+
+    if postAsBot is None:
+        return False, "Slack service unavailable (import failed).", True
+    if not _MONGODB_URI:
+        return False, "draft_slack requires MONGODB_URI for channel lookup.", True
+
+    try:
+        response = postAsBot(text, channel_key)
+        ts       = response.get("ts", "unknown")
+        resolved = response.get("channel", channel_key or "default")
+        result   = f"Draft Slack message (bot) posted to channel={resolved}. ts={ts}"
+        return True, result, False
+    except (ValueError, RuntimeError) as exc:
+        return False, str(exc), False
+    except Exception as exc:
+        return False, f"draft_slack failed: {exc}", False
 
 
 async def _action_create_jira(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
@@ -826,7 +845,7 @@ async def get_graph(ctx: Context) -> GraphResponse:
 
     if not _MONGODB_URI:
         nodes, edges = _build_graph_from_hardcoded()
-        ctx.logger.info(f"Graph (hardcoded) | {len(nodes)} nodes | {len(edges)} edges")
+        ctx.logger.debug(f"Graph (hardcoded) | {len(nodes)} nodes | {len(edges)} edges")
         return GraphResponse(nodes=nodes, edges=edges, generated_at=now, source="hardcoded")
 
     try:
@@ -863,13 +882,50 @@ async def get_graph(ctx: Context) -> GraphResponse:
                 }
 
         edges = [GraphEdge(**e) for e in edge_map.values()]
-        ctx.logger.info(f"Graph (mongodb) | {len(nodes)} nodes | {len(edges)} edges")
+        ctx.logger.debug(f"Graph (mongodb) | {len(nodes)} nodes | {len(edges)} edges")
         return GraphResponse(nodes=nodes, edges=edges, generated_at=now, source="mongodb")
 
     except Exception as exc:
         ctx.logger.warning(f"Graph MongoDB read failed, falling back: {exc}")
         nodes, edges = _build_graph_from_hardcoded()
         return GraphResponse(nodes=nodes, edges=edges, generated_at=now, source="hardcoded")
+
+
+# ---------------------------------------------------------------------------
+# Action log feed endpoint — used by dashboard pipeline trace
+# ---------------------------------------------------------------------------
+
+@agent.on_rest_get("/log", FeedResponse)
+async def get_log(ctx: Context) -> FeedResponse:
+    """
+    Returns the 30 most-recent action_log entries for the dashboard feed.
+    Falls back to empty list when MongoDB is not configured.
+    """
+    if not _MONGODB_URI:
+        return FeedResponse(entries=[], source="fallback")
+    try:
+        db = _get_db()
+        docs = list(
+            db["action_log"]
+            .find({}, {"_id": 0})
+            .sort("created_at", -1)
+            .limit(30)
+        )
+        entries = [
+            FeedEntry(
+                ts=doc.get("created_at", ""),
+                agent="perform_action",
+                tool=doc.get("action_type", "unknown"),
+                status="DONE" if doc.get("success") else "FAIL",
+                stub=bool(doc.get("stub", True)),
+                meta=(doc.get("result") or "")[:60],
+            )
+            for doc in docs
+        ]
+        return FeedResponse(entries=entries, source="mongodb")
+    except Exception as exc:
+        ctx.logger.warning(f"log endpoint failed: {exc}")
+        return FeedResponse(entries=[], source="fallback")
 
 
 # ---------------------------------------------------------------------------

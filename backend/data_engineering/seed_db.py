@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent.parent))
 load_dotenv()
 
-from data.company_data import CALENDAR, JIRA, SLACK, USERS
+from data_engineering.company_data import CALENDAR, JIRA, SLACK, USERS
 
 _LABEL_ROLE_MAP = {"design": "Design", "gtm": "GTM", "marketing": "GTM",
                    "legal": "GTM", "engineering": "Engineering", "backend": "Engineering",
