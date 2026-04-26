@@ -42,7 +42,7 @@ def _patch_agent_info() -> None:
 
 _patch_agent_info()
 
-# Import agents
+# Import sub-agents first to get their computed local addresses
 from agents.orchestrator.agent import orchestrator
 from agents.status_agent.agent import agent as status_agent
 from agents.historical_agent.agent import agent as historical_agent

@@ -1,13 +1,12 @@
 // StandIn — App shell: nav, health bar, route switcher, tweaks integration.
 
 function HealthBar({ route, setRoute, counts }) {
-  const [tick, setTick] = useState(0);
   useEffect(() => {
-    const t = setInterval(() => setTick(x => x + 1), 5000);
+    const t = setInterval(() => window.MOCK_API.healthAgents(), 8000);
     return () => clearInterval(t);
   }, []);
   const agents = window.MOCK_API.healthAgents();
-  const state = window.MOCK_API.healthState();
+  const state  = window.MOCK_API.healthState();
   const source = window.MOCK_API.getSource();
 
   const tabs = [
@@ -15,6 +14,22 @@ function HealthBar({ route, setRoute, counts }) {
     { id: 'graph',     label: 'Team graph',    count: counts.graph,     kbd: '2' },
     { id: 'monitor',   label: 'Orchestration', count: counts.feed,      kbd: '3' },
   ];
+
+  const offlineNames = agents.filter(a => !(state[a.id]?.online ?? true)).map(a => a.name);
+  const allOnline    = offlineNames.length === 0;
+  const isLive       = source === 'mongodb';
+
+  let statusLabel, statusClass;
+  if (!allOnline) {
+    statusLabel = `${offlineNames.length} offline`;
+    statusClass = 'degraded';
+  } else if (isLive) {
+    statusLabel = 'Live';
+    statusClass = 'online';
+  } else {
+    statusLabel = 'Demo';
+    statusClass = 'demo';
+  }
 
   return (
     <header className="healthbar" data-screen-label="Top rail">
@@ -30,31 +45,21 @@ function HealthBar({ route, setRoute, counts }) {
                   onClick={() => setRoute(t.id)}
                   aria-current={route === t.id ? 'page' : undefined}>
             {t.label}
-            <span className="count tabular">{t.count}</span>
+            {t.count > 0 && <span className="count tabular">{t.count}</span>}
             <span className="nav-kbd">{t.kbd}</span>
           </button>
         ))}
       </nav>
-      <div className="healthbar-pills">
-        {agents.map(a => {
-          const st = state[a.id] || { online: true };
-          return (
-            <div key={a.id} className={`health-pill ${st.online ? '' : 'down'}`} title={`${a.name} :${a.port}`}>
-              <span className="dot"/>
-              <span>{a.name}</span>
-              <span className="meta">
-                <span>:{a.port}</span>
-                <b className={st.Gemini ? '' : 'off'}>G</b>
-                <b className={st.MongoDB ? '' : 'off'}>M</b>
-              </span>
-            </div>
-          );
-        })}
-      </div>
       <div className="healthbar-spacer"/>
-      <div className={`healthbar-source ${source === 'mongodb' ? 'live' : 'demo'}`}>
-        {source === 'mongodb' ? 'live · mongodb' : 'demo · hardcoded'}
-      </div>
+      {statusClass !== 'demo' && (
+        <div
+          className={`system-status ${statusClass}`}
+          title={allOnline ? `All agents online · ${source}` : `Offline: ${offlineNames.join(', ')}`}
+        >
+          <span className="dot"/>
+          {statusLabel}
+        </div>
+      )}
     </header>
   );
 }

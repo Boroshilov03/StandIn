@@ -1003,6 +1003,96 @@ def _redact_raw_via_gx10(role: str, raw: dict, workflow_id: str) -> tuple[dict, 
     return redacted, trust
 
 
+_MULTI_SYNTHESIS_TMPL = """\
+You are synthesising status reports for {n} roles in a single pass: {roles_csv}.
+
+Each role has its own gathered raw_data block. Cross-reference the four sources
+(slack_messages, jira_tickets, seed_docs, calendar) within each role; you may
+also use signals from one role's data to corroborate or contradict another's.
+
+Return ONLY valid JSON in this exact shape — no markdown, no extra keys:
+{{
+  "roles": {{
+    "<role_name>": {{
+      "summary": "<one paragraph>",
+      "blockers": ["<blocker string>", ...],
+      "claims": [
+        {{"claim": "<single factual statement>", "source_ids": ["<id>", ...], "confidence": <0.0-1.0>, "risk": "<high|medium|low>"}}
+      ]
+    }},
+    ...
+  }}
+}}
+
+The "roles" object MUST contain one key per role listed above, spelled exactly.
+
+Per-role raw data and analyst lens:
+{role_blocks}
+"""
+
+
+async def _synthesize_all_roles(
+    roles: list[str], raw_data: dict[str, dict], workflow_id: str = "unknown"
+) -> dict[str, dict] | None:
+    """One Gemini call for all roles. Returns {role: synth_dict}; None on failure."""
+    if not _GEMINI_KEY or not roles:
+        return None
+    try:
+        from google.genai import types as gt
+
+        # GX10 redaction per role (cheap; runs locally)
+        redacted_per_role: dict[str, dict] = {}
+        for role in roles:
+            redacted_raw, trust_meta = _redact_raw_via_gx10(role, raw_data[role], workflow_id)
+            _LOGGER.info(
+                "GX10 redaction for %s | status=%s | redacted=%d fields | sentToCloud=%d docs",
+                role,
+                trust_meta.get("trustLayerStatus"),
+                trust_meta.get("sensitiveFieldsRedacted", 0),
+                trust_meta.get("rawDocumentsSentToCloud", 0),
+            )
+            redacted_per_role[role] = redacted_raw
+
+        role_blocks_parts: list[str] = []
+        for role in roles:
+            r = redacted_per_role[role]
+            role_blocks_parts.append(
+                f"=== ROLE: {role} ===\n"
+                f"lens: {r.get('lens', '')}\n"
+                f"raw_data: {json.dumps({k: v for k, v in r.items() if k != 'lens'}, default=str)}\n"
+            )
+
+        prompt = _MULTI_SYNTHESIS_TMPL.format(
+            n=len(roles),
+            roles_csv=", ".join(roles),
+            role_blocks="\n".join(role_blocks_parts),
+        )
+
+        client = _get_gemini_client()
+        resp = await client.aio.models.generate_content(
+            model=_GEMINI_MODEL,
+            contents=prompt,
+            config=gt.GenerateContentConfig(
+                system_instruction=_SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                thinking_config=gt.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        parsed = json.loads(resp.text)
+        roles_out = parsed.get("roles") or {}
+        if not isinstance(roles_out, dict):
+            return None
+        validated: dict[str, dict] = {}
+        for role in roles:
+            entry = roles_out.get(role)
+            if isinstance(entry, dict):
+                validated[role] = _validate_synthesis(entry)
+        return validated or None
+    except Exception as exc:
+        _LOGGER.warning(f"Gemini multi-role synthesis failed: {exc}")
+        return None
+
+
 async def _synthesize_role(role: str, raw: dict, workflow_id: str = "unknown") -> dict | None:
     if not _GEMINI_KEY:
         return None
@@ -1202,6 +1292,7 @@ async def _detect_contradictions(responses: list[MeetingResponse], workflow_id: 
             config=gt.GenerateContentConfig(
                 system_instruction=_SYSTEM_PROMPT,
                 response_mime_type="application/json",
+                thinking_config=gt.ThinkingConfig(thinking_budget=0),
             ),
         )
         gemini = json.loads(resp.text)
@@ -1434,18 +1525,35 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
         f"Phase 1 done | {t1_ms}ms | results_per_role={tool_counts}"
     )
 
-    # ── Phase 2: Gemini synthesis — all roles in parallel ────────────────
-    # All synthesis calls fire simultaneously; one slow Gemini response
-    # does not delay the others.
+    # ── Phase 2: Gemini synthesis — single call, all roles together ──────
+    # One generate_content covers every role. Massive latency win vs N
+    # parallel calls because we only pay one round-trip + one cold start.
     t2 = time.monotonic()
-    # Each role's raw data is redacted via the GX10 edge trust layer inside
-    # _synthesize_role before it ever reaches Gemini.
-    synth_results = await asyncio.gather(
-        *[_synthesize_role(role, raw_data[role], workflow_id=msg.request_id) for role in roles],
-        return_exceptions=True,
-    )
+    multi = await _synthesize_all_roles(roles, raw_data, workflow_id=msg.request_id)
+
+    synth_results: list[dict | None] = []
+    missing_roles: list[str] = []
+    if multi is not None:
+        for role in roles:
+            entry = multi.get(role)
+            if entry is None:
+                missing_roles.append(role)
+            synth_results.append(entry)
+    else:
+        missing_roles = list(roles)
+        synth_results = [None] * len(roles)
+
+    # Fallback: any roles the single call dropped → fill via per-role calls in parallel
+    if missing_roles:
+        ctx.logger.warning(f"Multi-synthesis missing {len(missing_roles)} role(s); per-role fallback: {missing_roles}")
+        fb_tasks = [_synthesize_role(r, raw_data[r], workflow_id=msg.request_id) for r in missing_roles]
+        fb_out = await asyncio.gather(*fb_tasks, return_exceptions=True)
+        fb_map = {r: (None if isinstance(o, Exception) else o) for r, o in zip(missing_roles, fb_out)}
+        synth_results = [synth_results[i] or fb_map.get(roles[i]) for i in range(len(roles))]
+
     t2_ms = int((time.monotonic() - t2) * 1000)
-    ctx.logger.info(f"Phase 2 done | {t2_ms}ms (Gemini synthesis × {len(roles)} roles)")
+    mode = "multi" if multi is not None and not missing_roles else ("multi+fallback" if multi is not None else "fallback")
+    ctx.logger.info(f"Phase 2 done | {t2_ms}ms (Gemini synthesis · {len(roles)} roles · mode={mode})")
 
     role_responses: list[MeetingResponse] = []
     used_fallback = False
