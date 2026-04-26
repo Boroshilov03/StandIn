@@ -47,7 +47,7 @@ from agents.status_agent.agent import agent as status_agent
 from uagents import Context, Protocol
 
 TEST_BUREAU_PORT = int(os.getenv("TEST_BUREAU_PORT", "8100"))
-TEST_TIMEOUT_SECONDS = int(os.getenv("TEST_TIMEOUT_SECONDS", "60"))
+TEST_TIMEOUT_SECONDS = int(os.getenv("TEST_TIMEOUT_SECONDS", "300"))
 
 client = Agent(
     name="standin_test_client",
@@ -96,10 +96,16 @@ async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement) -> Non
 @client_proto.on_message(ChatMessage)
 async def handle_reply(ctx: Context, sender: str, msg: ChatMessage) -> None:
     global _completed
-    _completed = True
+    text = msg.text()
     print("\n=== Orchestrator Reply ===\n", flush=True)
-    print(msg.text(), flush=True)
+    print(text, flush=True)
     print("\n==========================\n", flush=True)
+    # If this was a CIBA pending-approval notice, keep the bureau alive so the
+    # background poller can fire after the user taps approve on their phone.
+    if "Approval requested" in text or "push to your phone" in text.lower():
+        ctx.logger.info("Awaiting phone approval — bureau will stay up for the follow-up reply.")
+        return
+    _completed = True
     await _shutdown(0)
 
 

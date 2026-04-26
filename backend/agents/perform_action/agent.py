@@ -142,6 +142,7 @@ def _save_pending_approval(
     ticket_status: str = "in_review", risk: str = "medium",
     stub: bool = True, escalation: dict | None = None,
     auth0_ciba: dict | None = None,
+    chat_origin: dict | None = None,
 ) -> None:
     """Persist an action to pending_approvals collection."""
     if not _MONGODB_URI:
@@ -166,6 +167,7 @@ def _save_pending_approval(
             "stub":           stub,
             "escalation":     escalation or {},
             "auth0_ciba":     auth0_ciba or {},
+            "chat_origin":    chat_origin or {},
         })
     except Exception:
         pass
@@ -738,6 +740,7 @@ async def _handle_action_inner(ctx: Context, sender: str, msg: ActionRequest):
             risk=msg.risk or "medium",
             stub=True,
             auth0_ciba=ciba_meta,
+            chat_origin={"reply_to": sender, "request_id": msg.request_id},
         )
         ctx.logger.info(
             f"Action queued for approval | type={msg.action_type} | id={action_id}"
@@ -1118,6 +1121,168 @@ async def approvals_ciba_poll(ctx: Context, req: _CibaPollRequest) -> _CibaPollR
     except Exception as exc:
         ctx.logger.error(f"approvals_ciba_poll failed: {exc}")
         return _CibaPollResponse(action_id=req.action_id, state="error", result=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Background CIBA poller — auto-execute actions when user approves on phone
+# ---------------------------------------------------------------------------
+
+_CIBA_POLL_INTERVAL = float(os.getenv("CIBA_BG_POLL_INTERVAL_SECONDS", "5"))
+
+
+@agent.on_interval(period=_CIBA_POLL_INTERVAL)
+async def _ciba_background_poller(ctx: Context) -> None:
+    """Scan pending_approvals for CIBA-pending actions, poll Auth0, execute on approve."""
+    if auth0_ai is None or not auth0_ai.ciba_configured():
+        return
+    if not _MONGODB_URI:
+        return
+    # Only poll recent pending approvals — auth_req_ids expire (typically
+    # ~10 min) and stale docs from earlier runs would spam state=error.
+    max_age_minutes = float(os.getenv("CIBA_MAX_AGE_MINUTES", "10"))
+    cutoff_iso = (datetime.now(UTC) - timedelta(minutes=max_age_minutes)).isoformat()
+    try:
+        db = _get_db()
+        cursor = db["pending_approvals"].find(
+            {
+                "status": "pending",
+                "auth0_ciba.auth_req_id": {"$exists": True, "$ne": ""},
+                "created_at": {"$gte": cutoff_iso},
+            },
+            {"action_id": 1, "action_type": 1, "payload": 1, "priority": 1,
+             "owner": 1, "title": 1, "summary": 1, "team": 1, "auth0_ciba": 1,
+             "chat_origin": 1},
+        ).limit(20)
+    except Exception as exc:
+        ctx.logger.error(f"CIBA bg poll: db scan failed: {exc}")
+        return
+
+    # Sweep older still-pending CIBA rows so they don't sit forever.
+    try:
+        db["pending_approvals"].update_many(
+            {
+                "status": "pending",
+                "auth0_ciba.auth_req_id": {"$exists": True, "$ne": ""},
+                "created_at": {"$lt": cutoff_iso},
+            },
+            {"$set": {"status": "expired", "result": "ciba_expired",
+                      "resolved_at": datetime.now(UTC).isoformat()}},
+        )
+    except Exception:
+        pass
+
+    for doc in cursor:
+        action_id   = doc.get("action_id")
+        meta        = dict(doc.get("auth0_ciba") or {})
+        auth_req_id = meta.get("auth_req_id")
+        if not action_id or not auth_req_id:
+            continue
+        try:
+            state, _id_token = auth0_ai.ciba_poll(auth_req_id)
+        except Exception as exc:
+            ctx.logger.warning(f"CIBA bg poll: poll failed | id={action_id} | {exc}")
+            continue
+
+        meta["state"]     = state
+        meta["polled_at"] = datetime.now(UTC).isoformat()
+        try:
+            db["pending_approvals"].update_one(
+                {"action_id": action_id}, {"$set": {"auth0_ciba": meta}},
+            )
+        except Exception:
+            pass
+
+        if state == "pending":
+            continue
+
+        ctx.logger.info(f"CIBA bg poll | id={action_id} | state={state}")
+
+        chat_origin = dict(doc.get("chat_origin") or {})
+        reply_to    = chat_origin.get("reply_to")
+        chat_req_id = chat_origin.get("request_id")
+
+        if state in ("denied", "expired", "error"):
+            _mark_approval_done(action_id, approved=False, result=f"ciba_{state}")
+            _emit_notification(
+                kind="action.rejected",
+                title=f"{str(doc.get('action_type','')).replace('_',' ').title()} {state} on phone",
+                body=(doc.get("title") or "")[:300],
+                severity="warning",
+                action_id=action_id,
+                team=doc.get("team"), owner=doc.get("owner"),
+            )
+            if reply_to and chat_req_id:
+                try:
+                    await ctx.send(reply_to, ActionResponse(
+                        request_id=chat_req_id,
+                        action_type=doc.get("action_type", ""),
+                        success=False,
+                        action_id=action_id,
+                        result=f"ciba_{state}",
+                        stub=False,
+                    ))
+                except Exception as exc:
+                    ctx.logger.warning(f"CIBA bg poll: follow-up send failed | {exc}")
+            continue
+
+        if state != "approved":
+            continue
+
+        # Approved — execute the action.
+        action_type = doc.get("action_type", "")
+        payload     = dict(doc.get("payload") or {})
+        priority    = doc.get("priority", "normal")
+        handler     = _ACTIONS.get(action_type)
+
+        if action_type == "send_slack" and not (payload.get("user_id") or "").strip():
+            if (doc.get("owner") or "").strip():
+                payload["user_id"] = doc["owner"].strip()
+
+        ok, payload, validation_error = normalize_action_payload(
+            action_type, payload,
+            {"owner": doc.get("owner"), "title": doc.get("title"),
+             "summary": doc.get("summary"), "context": "", "priority": priority},
+        )
+        if handler is None or not ok:
+            err = validation_error or f"No handler for '{action_type}'"
+            _mark_approval_done(action_id, approved=False, result=err)
+            ctx.logger.error(f"CIBA bg poll: cannot execute | id={action_id} | {err}")
+            continue
+
+        try:
+            success, result, _ = await handler(action_id, payload, priority)
+        except Exception as exc:
+            success, result = False, f"handler error: {exc}"
+
+        _mark_approval_done(action_id, approved=success, result=result)
+        _log_action(action_id, action_type, payload, success, result, stub=False)
+        ctx.logger.info(
+            f"CIBA bg poll: executed | id={action_id} | type={action_type} | "
+            f"success={success} | result={(result or '')[:300]}"
+        )
+
+        if success:
+            _emit_notification(
+                kind="action.executed",
+                title=f"{action_type.replace('_', ' ').title()} delivered (Auth0 CIBA)",
+                body=(doc.get("title") or result or "")[:300],
+                severity="success",
+                action_id=action_id,
+                team=doc.get("team"), owner=doc.get("owner"),
+            )
+
+        if reply_to and chat_req_id:
+            try:
+                await ctx.send(reply_to, ActionResponse(
+                    request_id=chat_req_id,
+                    action_type=action_type,
+                    success=success,
+                    action_id=action_id,
+                    result=result,
+                    stub=False,
+                ))
+            except Exception as exc:
+                ctx.logger.warning(f"CIBA bg poll: follow-up send failed | {exc}")
 
 
 # ---------------------------------------------------------------------------
