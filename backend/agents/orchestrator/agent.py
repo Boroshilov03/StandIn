@@ -46,6 +46,7 @@ from models import (
     RAGResponse,
 )
 
+<<<<<<< HEAD
 _LOGGER = logging.getLogger("standin_orchestrator")
 
 # ---------------------------------------------------------------------------
@@ -58,6 +59,48 @@ orchestrator = Agent(
     seed=ORCHESTRATOR_SEED,
     port=8000,
     mailbox=True,
+=======
+_SEED = os.getenv("ORCHESTRATOR_SEED", "standin_orchestrator_seed_v1")
+_PORT = int(os.getenv("ORCHESTRATOR_PORT", "8001"))
+_GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
+_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_LOGGER = logging.getLogger("standin_orchestrator")
+
+# Gemini client — created once to reuse TCP/TLS connection across all calls
+_GEMINI_CLIENT = None
+
+
+def _get_gemini_client():
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is None and _GEMINI_KEY:
+        from google import genai
+        _GEMINI_CLIENT = genai.Client(api_key=_GEMINI_KEY)
+    return _GEMINI_CLIENT
+
+
+def _normalize_submit_endpoint(raw_endpoint: str | None, port: int) -> str | None:
+    if not raw_endpoint:
+        return None
+    endpoint = raw_endpoint.rstrip("/")
+    if endpoint.endswith("/submit"):
+        return endpoint
+    return f"{endpoint}/submit"
+
+
+_ENDPOINT = _normalize_submit_endpoint(
+    os.getenv("ORCHESTRATOR_ENDPOINT") or os.getenv("PUBLIC_BASE_URL"),
+    _PORT,
+)
+_AGENTVERSE = (os.getenv("AGENTVERSE_URL") or "").rstrip("/") or None
+
+orchestrator = Agent(
+    name="standin_orchestrator",
+    seed=_SEED,
+    port=_PORT,
+    endpoint=[_ENDPOINT] if _ENDPOINT else None,
+    agentverse=_AGENTVERSE,
+    mailbox=False,
+>>>>>>> main
     publish_agent_details=True,
 )
 
@@ -110,7 +153,7 @@ ACTION_HINTS = {
     "draft_slack": ("draft slack", "slack draft"),
     "create_jira": ("jira", "ticket", "issue"),
     "update_jira_status": ("move ticket", "update jira", "transition jira", "change ticket status"),
-    "schedule_meeting": ("schedule", "meeting", "calendar", "invite"),
+    "schedule_meeting": ("schedule", "book meeting", "set up meeting", "invite"),
     "create_action_item": ("action item", "todo", "task"),
     "post_brief": ("post brief", "save brief", "publish brief"),
 }
@@ -130,11 +173,17 @@ Return strict JSON with this schema:
 }
 
 Rules:
-- status_query = current state / readiness / blockers
-- conflict_check = contradictions, disagreements, inconsistencies
+- status_query   = current state / readiness / blockers for a team or project
+- conflict_check = contradictions, disagreements, inconsistencies between teams
 - briefing_request = broad cross-team summary / executive brief
-- history_query = past decisions, previous meetings, what happened before
+- history_query  = past decisions, previous meetings, what happened before,
+                   OR any lookup about a specific person, ticket, or entity
+                   (e.g. "anything about Derek", "what is Alice working on", "tell me about NOVA-142")
 - action_request = asks to send/create/update/schedule/post something
+- Calendar read requests are NOT action_request:
+  - upcoming/current meetings -> status_query
+  - past meetings/events/history -> history_query
+- Calendar create/update requests ARE action_request (typically schedule_meeting).
 - Extract teams only from explicit team mentions.
 - Keep topic short and literal.
 - time_window should only be set when clearly present.
@@ -166,6 +215,24 @@ def _extract_time_window(text: str) -> str | None:
         lowered,
     )
     return match.group(0) if match else None
+
+
+def _is_calendar_read_request(text: str) -> bool:
+    lowered = text.lower()
+    calendar_terms = ("meeting", "meetings", "calendar", "event", "events")
+    read_terms = ("what", "show", "list", "read", "upcoming", "next", "have", "find")
+    write_terms = ("schedule", "book", "create", "set up", "invite", "add")
+    has_calendar = any(term in lowered for term in calendar_terms)
+    has_read = any(term in lowered for term in read_terms)
+    has_write = any(term in lowered for term in write_terms)
+    return has_calendar and has_read and not has_write
+
+
+def _is_calendar_past_query(text: str) -> bool:
+    lowered = text.lower()
+    past_terms = ("past", "previous", "last", "earlier", "history", "happened", "had")
+    calendar_terms = ("meeting", "meetings", "calendar", "event", "events")
+    return any(term in lowered for term in past_terms) and any(term in lowered for term in calendar_terms)
 
 
 def _infer_action_type(text: str) -> str | None:
@@ -206,6 +273,12 @@ def _infer_action_payload(text: str, action_type: str | None) -> dict:
         payload["start_time"] = _extract_time_window(text) or ""
         payload["duration_minutes"] = 30
         payload["description"] = text
+    elif action_type == "read_calendar_events":
+        payload["max_results"] = 10
+        payload["query"] = ""
+        payload["time_min"] = ""
+        payload["time_max"] = ""
+        payload["description"] = text
     elif action_type == "create_action_item":
         payload["description"] = text
         payload["owner"] = "unassigned"
@@ -222,7 +295,14 @@ def _fallback_classification(text: str) -> IntentClassification:
     time_window = _extract_time_window(text)
     action_type = _infer_action_type(text)
 
-    if action_type:
+    if _is_calendar_read_request(text):
+        action_type = None
+
+    if _is_calendar_past_query(text):
+        intent = "history_query"
+    elif _is_calendar_read_request(text):
+        intent = "status_query"
+    elif action_type:
         intent = "action_request"
     elif any(token in lowered for token in ("history", "previous", "earlier", "before", "decided", "past")):
         intent = "history_query"
@@ -230,6 +310,9 @@ def _fallback_classification(text: str) -> IntentClassification:
         intent = "conflict_check"
     elif any(token in lowered for token in ("briefing", "brief", "summary", "recap", "overview")):
         intent = "briefing_request"
+    # Person/entity lookups — no team keyword but mentions a name or ticket id → RAG
+    elif not teams and re.search(r'\b[A-Z][a-z]+\s+[A-Z][a-z]+\b|NOVA-\d+', text):
+        intent = "history_query"
     else:
         intent = "status_query"
 
@@ -237,6 +320,10 @@ def _fallback_classification(text: str) -> IntentClassification:
     if action_type:
         payload_json = json.dumps(_infer_action_payload(text, action_type))
 
+    _LOGGER.info(
+        f"Classification (fallback/no-Gemini) | intent={intent} | "
+        f"teams={teams} | action_type={action_type} | confidence=0.45"
+    )
     return IntentClassification(
         intent=intent,
         teams=teams,
@@ -253,10 +340,13 @@ async def _classify(text: str) -> IntentClassification:
         return _fallback_classification(text)
 
     try:
-        from google import genai
         from google.genai import types as gt
 
+<<<<<<< HEAD
         client = genai.Client(api_key=GEMINI_API_KEY)
+=======
+        client = _get_gemini_client()
+>>>>>>> main
         resp = await client.aio.models.generate_content(
             model=GEMINI_MODEL,
             contents=f"User request:\n{text}",
@@ -272,7 +362,7 @@ async def _classify(text: str) -> IntentClassification:
                 _infer_action_payload(text, payload.get("action_type"))
             )
 
-        return IntentClassification(
+        result = IntentClassification(
             intent=payload.get("intent", "status_query"),
             teams=payload.get("teams") or [],
             topic=payload.get("topic"),
@@ -281,14 +371,38 @@ async def _classify(text: str) -> IntentClassification:
             action_payload_json=action_payload_json,
             confidence=float(payload.get("confidence") or 0.0),
         )
+        _LOGGER.info(
+            f"Classification (Gemini) | intent={result.intent} | "
+            f"teams={result.teams} | action_type={result.action_type} | "
+            f"confidence={result.confidence:.2f}"
+        )
+        return result
     except Exception as exc:
         _LOGGER.warning(f"Gemini classification failed, using fallback: {exc}")
         return _fallback_classification(text)
 
 
+<<<<<<< HEAD
 # ---------------------------------------------------------------------------
 # Response formatters
 # ---------------------------------------------------------------------------
+=======
+def _enforce_calendar_routing(text: str, cls: IntentClassification) -> IntentClassification:
+    if _is_calendar_past_query(text):
+        cls.intent = "history_query"
+        cls.action_type = None
+        cls.action_payload_json = None
+    elif _is_calendar_read_request(text):
+        cls.intent = "status_query"
+        cls.action_type = None
+        cls.action_payload_json = None
+    return cls
+
+
+def _briefing_roles(classification: IntentClassification) -> list[str] | None:
+    return classification.teams or None
+
+>>>>>>> main
 
 def _format_status_response(msg: FullBriefResponse, intent: str) -> str:
     lines = [
@@ -391,8 +505,13 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         await _send_reply(ctx, sender, "I did not receive any text to route.")
         return
 
+<<<<<<< HEAD
     # Classify intent using Gemini (or keyword fallback)
     classification = await _classify(text)
+=======
+    classification = _enforce_calendar_routing(user_text, await _classify(user_text))
+    ctx.logger.info(f"Incoming | sender={sender[:24]}… | text='{user_text[:120]}'")
+>>>>>>> main
     request_id = str(uuid.uuid4())
 
     pending_requests[request_id] = {
@@ -401,8 +520,14 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
     }
 
     ctx.logger.info(
+<<<<<<< HEAD
         f"Classified | id={request_id} | intent={classification.intent} | "
         f"teams={classification.teams} | action={classification.action_type}"
+=======
+        f"Routing | id={request_id} | intent={classification.intent} | "
+        f"teams={classification.teams} | topic={classification.topic} | "
+        f"action_type={classification.action_type} | confidence={classification.confidence:.2f}"
+>>>>>>> main
     )
 
     # Route to the appropriate sub-agent
@@ -412,14 +537,24 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
             await _send_reply(ctx, sender, "Status agent address not configured.")
             return
         session_id = status_sessions.get(sender)
+        roles = _briefing_roles(classification)
+        ctx.logger.info(
+            f"→ StatusAgent | id={request_id} | roles={roles} | "
+            f"session_id={session_id} | dest={STATUS_AGENT_ADDRESS[:24]}…"
+        )
         await ctx.send(
             STATUS_AGENT_ADDRESS,
             FullBriefRequest(
                 request_id=request_id,
                 user_email=sender,
                 topic=classification.topic,
+<<<<<<< HEAD
                 roles=classification.teams or None,
                 context=text,
+=======
+                roles=roles,
+                context=user_text,
+>>>>>>> main
                 session_id=session_id,
             ),
         )
@@ -431,6 +566,10 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
             await _send_reply(ctx, sender, "Historical agent address not configured.")
             return
         role_filter = classification.teams[0] if classification.teams else None
+        ctx.logger.info(
+            f"→ HistoricalAgent | id={request_id} | role_filter={role_filter} | "
+            f"dest={HISTORICAL_AGENT_ADDRESS[:24]}…"
+        )
         await ctx.send(
             HISTORICAL_AGENT_ADDRESS,
             RAGRequest(
@@ -450,16 +589,28 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         action_type = classification.action_type or _infer_action_type(text)
         if not action_type:
             pending_requests.pop(request_id, None)
+<<<<<<< HEAD
             await _send_reply(
                 ctx, sender,
                 "I could not determine which action to run. "
                 "Try asking explicitly to send Slack, send email, create Jira, "
                 "schedule a meeting, or create an action item.",
+=======
+            ctx.logger.warning(f"action_request but no action_type detected | id={request_id}")
+            await _send_chat_reply(
+                ctx,
+                sender,
+                "I could not determine which action to run. Try asking explicitly to send Slack, send email, create Jira, schedule a meeting, or create an action item.",
+>>>>>>> main
             )
             return
 
         payload_json = classification.action_payload_json or json.dumps(
             _infer_action_payload(text, action_type)
+        )
+        ctx.logger.info(
+            f"→ PerformAction | id={request_id} | action_type={action_type} | "
+            f"dest={PERFORM_ACTION_ADDRESS[:24]}…"
         )
         await ctx.send(
             PERFORM_ACTION_ADDRESS,
@@ -475,7 +626,12 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
 
     # Unknown intent
     pending_requests.pop(request_id, None)
+<<<<<<< HEAD
     await _send_reply(ctx, sender, "I could not classify that request.")
+=======
+    ctx.logger.warning(f"Unclassified request | id={request_id} | intent={classification.intent}")
+    await _send_chat_reply(ctx, sender, "I could not classify that request.")
+>>>>>>> main
 
 
 @chat_proto.on_message(ChatAcknowledgement)
@@ -489,30 +645,70 @@ async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
 
 @orchestrator.on_message(FullBriefResponse)
 async def handle_status_response(ctx: Context, sender: str, msg: FullBriefResponse):
+    ctx.logger.info(
+        f"← FullBriefResponse | id={msg.request_id} | mode={msg.mode} | "
+        f"escalation={msg.escalation_required} | confidence={msg.overall_confidence:.2f} | "
+        f"contradictions={len(msg.contradictions)} | passports={len(msg.evidence_passports)} | "
+        f"deltas={len(msg.delta_claims or [])}"
+    )
     pending = pending_requests.pop(msg.request_id, None)
     if not pending:
+        ctx.logger.warning(
+            f"FullBriefResponse id={msg.request_id} has no matching pending request — dropped"
+        )
         return
     status_sessions[pending["sender"]] = msg.session_id or status_sessions.get(pending["sender"], "")
     text = _format_status_response(msg, pending["intent"])
+<<<<<<< HEAD
     await _send_reply(ctx, pending["sender"], text)
+=======
+    ctx.logger.info(f"→ User | id={msg.request_id} | reply_len={len(text)} chars")
+    await _send_chat_reply(ctx, pending["sender"], text)
+>>>>>>> main
 
 
 @orchestrator.on_message(RAGResponse)
 async def handle_history_response(ctx: Context, sender: str, msg: RAGResponse):
+    ctx.logger.info(
+        f"← RAGResponse | id={msg.request_id} | method={msg.retrieval_method} | "
+        f"confidence={msg.confidence:.2f} | sources={msg.source_ids}"
+    )
     pending = pending_requests.pop(msg.request_id, None)
     if not pending:
+        ctx.logger.warning(
+            f"RAGResponse id={msg.request_id} has no matching pending request — dropped"
+        )
         return
+<<<<<<< HEAD
     text = _format_history_response(msg)
     await _send_reply(ctx, pending["sender"], text)
+=======
+
+    ctx.logger.info(f"→ User | id={msg.request_id} | reply_len={len(msg.answer)} chars")
+    await _send_chat_reply(ctx, pending["sender"], _format_history_response(msg))
+>>>>>>> main
 
 
 @orchestrator.on_message(ActionResponse)
 async def handle_action_response(ctx: Context, sender: str, msg: ActionResponse):
+    ctx.logger.info(
+        f"← ActionResponse | id={msg.request_id} | type={msg.action_type} | "
+        f"success={msg.success} | stub={msg.stub} | action_id={msg.action_id}"
+    )
     pending = pending_requests.pop(msg.request_id, None)
     if not pending:
+        ctx.logger.warning(
+            f"ActionResponse id={msg.request_id} has no matching pending request — dropped"
+        )
         return
+<<<<<<< HEAD
     text = _format_action_response(msg)
     await _send_reply(ctx, pending["sender"], text)
+=======
+
+    ctx.logger.info(f"→ User | id={msg.request_id} | result='{(msg.result or msg.error or '')[:80]}'")
+    await _send_chat_reply(ctx, pending["sender"], _format_action_response(msg))
+>>>>>>> main
 
 
 # ---------------------------------------------------------------------------
@@ -532,4 +728,8 @@ async def on_startup(ctx: Context):
 
 
 if __name__ == "__main__":
+    if _ENDPOINT:
+        print(f"Orchestrator endpoint: {_ENDPOINT}")
+    if _AGENTVERSE:
+        print(f"Agentverse URL: {_AGENTVERSE}")
     orchestrator.run()

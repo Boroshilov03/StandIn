@@ -19,6 +19,7 @@ import glob
 import json
 import logging
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timedelta, UTC
@@ -30,12 +31,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
+<<<<<<< HEAD
 try:
     asyncio.get_event_loop()
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
 from data.company_data import CALENDAR, JIRA, SLACK, USERS
+=======
+from data_engineering.company_data import CALENDAR, JIRA, SLACK, USERS
+>>>>>>> main
 from models import (
     Claim,
     EvidencePassport,
@@ -45,6 +50,10 @@ from models import (
     VerifyRequest,
     VerifyResponse,
 )
+try:
+    from services.calendar_service import list_events as list_calendar_events
+except Exception:
+    list_calendar_events = None
 
 # ---------------------------------------------------------------------------
 # Agent
@@ -54,19 +63,39 @@ _PORT = int(os.getenv("STATUS_AGENT_PORT", "8007"))
 _ENDPOINT = os.getenv("STATUS_AGENT_ENDPOINT", f"http://127.0.0.1:{_PORT}/submit")
 _GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
 _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+_SLACK_BOT_TOKEN  = os.getenv("SLACK_BOT_TOKEN",  "")
+_SLACK_USER_TOKEN = os.getenv("SLACK_USER_TOKEN",  "")
 _LOGGER = logging.getLogger("status_agent")
+
+# Channel name → Slack channel ID; populated lazily by _slack_list_channels()
+_slack_ch_cache: dict[str, str] = {}
+_slack_ch_cache_ts: float = 0.0
 
 agent = Agent(
     name="status_agent",
     seed=_SEED,
     port=_PORT,
+<<<<<<< HEAD
     endpoint=[_ENDPOINT],
+=======
+>>>>>>> main
     mailbox=False,
     publish_agent_details=False,
 )
 
 _STALE_HOURS = 48  # claims sourced from docs older than this are flagged stale
 _RAG_DOCS: list[dict] = []   # seed doc corpus loaded at startup
+
+# Gemini client — created once to reuse TCP/TLS connection across all calls
+_GEMINI_CLIENT = None
+
+
+def _get_gemini_client():
+    global _GEMINI_CLIENT
+    if _GEMINI_CLIENT is None and _GEMINI_KEY:
+        from google import genai
+        _GEMINI_CLIENT = genai.Client(api_key=_GEMINI_KEY)
+    return _GEMINI_CLIENT
 
 _TEAM_USERS: dict[str, set[str]] = {
     team: {k for k, v in USERS.items() if v["team"] == team}
@@ -260,11 +289,120 @@ _FALLBACKS: dict[str, dict] = {
 # Replace the body and set "connected": True in TOOL_REGISTRY.
 # ---------------------------------------------------------------------------
 
-async def _tool_slack_search(queries: list[str], team: str | None, limit: int) -> list[dict]:
-    """
-    STUB — mcp__claude_ai_Slack__slack_search_public_and_private
-    Replace body: await slack_search_public_and_private(query=" ".join(queries))
-    """
+def _slack_list_channels() -> dict[str, str]:
+    """Fetch public channel name→id via bot token. Cached 5 minutes."""
+    import time
+    import urllib.parse
+    import urllib.request as _ureq
+    global _slack_ch_cache, _slack_ch_cache_ts
+    if _slack_ch_cache and (time.time() - _slack_ch_cache_ts) < 300:
+        return _slack_ch_cache
+    try:
+        params = urllib.parse.urlencode(
+            {"types": "public_channel", "limit": "200", "exclude_archived": "true"}
+        )
+        req = _ureq.Request(
+            f"https://slack.com/api/conversations.list?{params}",
+            headers={"Authorization": f"Bearer {_SLACK_BOT_TOKEN}"},
+        )
+        with _ureq.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read().decode())
+        if data.get("ok"):
+            _slack_ch_cache = {f"#{c['name']}": c["id"] for c in data.get("channels", [])}
+            _slack_ch_cache_ts = time.time()
+    except Exception as exc:
+        _LOGGER.debug(f"conversations.list failed: {exc}")
+    return _slack_ch_cache
+
+
+def _slack_search_via_user_token(queries: list[str], limit: int) -> list[dict]:
+    """search.messages API — requires user token with search:read scope."""
+    import urllib.parse
+    import urllib.request as _ureq
+    combined = " ".join(queries[:3])
+    params = urllib.parse.urlencode(
+        {"query": combined, "count": str(min(limit * 3, 30)), "highlight": "false"}
+    )
+    req = _ureq.Request(
+        f"https://slack.com/api/search.messages?{params}",
+        headers={"Authorization": f"Bearer {_SLACK_USER_TOKEN}"},
+    )
+    with _ureq.urlopen(req, timeout=10) as r:
+        data = json.loads(r.read().decode())
+    if not data.get("ok"):
+        raise RuntimeError(f"search.messages: {data.get('error')}")
+    results = []
+    seen: set[str] = set()
+    for match in data.get("messages", {}).get("matches", []):
+        key = match.get("permalink") or match.get("ts", "")
+        if key in seen:
+            continue
+        seen.add(key)
+        ts = match.get("ts", "")
+        try:
+            iso_ts = datetime.fromtimestamp(float(ts), UTC).isoformat()
+        except (ValueError, OSError):
+            iso_ts = ts
+        ch_name = f"#{match.get('channel', {}).get('name', '?')}"
+        ch_id   = match.get("channel", {}).get("id", "")
+        results.append({
+            "content":     f"[{ch_name}] {match.get('username', '?')}: {match.get('text', '')[:400]}",
+            "source_id":   f"slack_{ch_id}_{ts.replace('.', '_')}",
+            "source_type": "slack",
+            "timestamp":   iso_ts,
+        })
+    return results[:limit]
+
+
+def _slack_history_search(queries: list[str], limit: int) -> list[dict]:
+    """Fallback: conversations.history on up to 8 channels (bot token)."""
+    import urllib.parse
+    import urllib.request as _ureq
+    ch_map = _slack_list_channels()
+    if not ch_map:
+        raise RuntimeError("No channels returned from conversations.list")
+    q_lower = {q.lower() for q in queries}
+    results: list[dict] = []
+    seen_ts: set[str] = set()
+    for n, (ch_name, ch_id) in enumerate(ch_map.items()):
+        if n >= 8:
+            break
+        try:
+            params = urllib.parse.urlencode({"channel": ch_id, "limit": "100"})
+            req = _ureq.Request(
+                f"https://slack.com/api/conversations.history?{params}",
+                headers={"Authorization": f"Bearer {_SLACK_BOT_TOKEN}"},
+            )
+            with _ureq.urlopen(req, timeout=6) as r:
+                ch_data = json.loads(r.read().decode())
+        except Exception:
+            continue
+        if not ch_data.get("ok"):
+            continue
+        for msg in ch_data.get("messages", []):
+            ts   = msg.get("ts", "")
+            text = (msg.get("text") or "").strip()
+            if not text or ts in seen_ts:
+                continue
+            if any(q in text.lower() for q in q_lower):
+                seen_ts.add(ts)
+                try:
+                    iso_ts = datetime.fromtimestamp(float(ts), UTC).isoformat()
+                except (ValueError, OSError):
+                    iso_ts = ""
+                results.append({
+                    "content":     f"[{ch_name}] {msg.get('username', msg.get('user', '?'))}: {text[:400]}",
+                    "source_id":   f"slack_{ch_id}_{ts.replace('.', '_')}",
+                    "source_type": "slack",
+                    "timestamp":   iso_ts,
+                })
+        if len(results) >= limit * 4:
+            break
+    return results[:limit]
+
+
+def _tool_slack_search_local(queries: list[str], team: str | None, limit: int) -> list[dict]:
+    """Seeded-data fallback — always available, no network needed."""
     results = []
     seen: set[str] = set()
     for q in queries:
@@ -273,16 +411,38 @@ async def _tool_slack_search(queries: list[str], team: str | None, limit: int) -
             if msg["id"] in seen:
                 continue
             team_match = (team is None) or (msg.get("role", "").lower() == team.lower())
-            text_match = q_lower in msg["content"].lower() or q_lower in msg.get("channel", "").lower()
+            text_match = (
+                q_lower in msg["content"].lower()
+                or q_lower in msg.get("channel", "").lower()
+            )
             if team_match and text_match:
                 seen.add(msg["id"])
                 results.append({
-                    "content": f"[{msg['channel']}] {msg['sender_name']}: {msg['content']}",
-                    "source_id": msg["id"],
+                    "content":     f"[{msg['channel']}] {msg['sender_name']}: {msg['content']}",
+                    "source_id":   msg["id"],
                     "source_type": "slack",
-                    "timestamp": msg["timestamp"],
+                    "timestamp":   msg["timestamp"],
                 })
     return results[:limit]
+
+
+async def _tool_slack_search(queries: list[str], team: str | None, limit: int) -> list[dict]:
+    """
+    Real Slack search with seeded-data fallback.
+    Uses search.messages (SLACK_USER_TOKEN) or conversations.history (SLACK_BOT_TOKEN).
+    Falls back to seeded SLACK dict when no token is configured or API fails.
+    """
+    if not (_SLACK_BOT_TOKEN or _SLACK_USER_TOKEN):
+        return _tool_slack_search_local(queries, team, limit)
+    try:
+        if _SLACK_USER_TOKEN:
+            results = await asyncio.to_thread(_slack_search_via_user_token, queries, limit)
+        else:
+            results = await asyncio.to_thread(_slack_history_search, queries, limit)
+        return results if results else _tool_slack_search_local(queries, team, limit)
+    except Exception as exc:
+        _LOGGER.warning(f"Slack API search failed ({exc}) — using seeded data")
+        return _tool_slack_search_local(queries, team, limit)
 
 
 async def _tool_jira_search(query: str, team_users: set[str] | None, limit: int) -> list[dict]:
@@ -365,13 +525,58 @@ async def _tool_web_search(query: str, limit: int) -> list[dict]:
     return []
 
 
+def _calendar_window_from_text(text: str | None) -> tuple[str, str]:
+    """
+    Build a future-looking ISO-8601 window from user text.
+    Defaults to the next 7 days when no explicit range is present.
+    """
+    now = datetime.now(UTC)
+    days = 7
+    if text:
+        lowered = text.lower()
+        match = re.search(r"\bnext\s+(\d{1,2})\s+days?\b", lowered)
+        if match:
+            days = max(1, min(30, int(match.group(1))))
+        elif "today" in lowered:
+            days = 1
+        elif "tomorrow" in lowered:
+            days = 2
+        elif "this week" in lowered:
+            days = 7
+    end = now + timedelta(days=days)
+    return now.isoformat().replace("+00:00", "Z"), end.isoformat().replace("+00:00", "Z")
+
+
+async def _tool_calendar_upcoming(context_text: str | None, limit: int) -> list[dict]:
+    if list_calendar_events is None:
+        return []
+    try:
+        time_min, time_max = _calendar_window_from_text(context_text)
+        events = list_calendar_events(time_min=time_min, time_max=time_max, max_results=limit)
+        return [
+            {
+                "content": (
+                    f"{event.get('summary', '(untitled)')} | "
+                    f"start={event.get('start', {}).get('dateTime') or event.get('start', {}).get('date', '')} | "
+                    f"end={event.get('end', {}).get('dateTime') or event.get('end', {}).get('date', '')}"
+                ),
+                "source_id": event.get("id", ""),
+                "source_type": "calendar",
+                "timestamp": event.get("updated", ""),
+            }
+            for event in events
+        ]
+    except Exception:
+        return []
+
+
 TOOL_REGISTRY = {
-    "slack":    {"fn": _tool_slack_search,       "connected": False, "mcp": "mcp__claude_ai_Slack"},
-    "jira":     {"fn": _tool_jira_search,        "connected": False, "mcp": "mcp__claude_ai_Atlassian"},
-    "rag_docs": {"fn": _tool_rag_query,          "connected": True,  "mcp": "local_seed_corpus"},
-    "drive":    {"fn": _tool_google_drive_search,"connected": False, "mcp": "mcp__claude_ai_Google_Drive"},
-    "notion":   {"fn": _tool_notion_search,      "connected": False, "mcp": "mcp__claude_ai_Notion"},
-    "web":      {"fn": _tool_web_search,         "connected": False, "mcp": "WebSearch"},
+    "slack":    {"fn": _tool_slack_search,        "connected": bool(_SLACK_BOT_TOKEN or _SLACK_USER_TOKEN), "mcp": "slack_api"},
+    "jira":     {"fn": _tool_jira_search,         "connected": False, "mcp": "mcp__claude_ai_Atlassian"},
+    "rag_docs": {"fn": _tool_rag_query,           "connected": True,  "mcp": "local_seed_corpus"},
+    "drive":    {"fn": _tool_google_drive_search, "connected": False, "mcp": "mcp__claude_ai_Google_Drive"},
+    "notion":   {"fn": _tool_notion_search,       "connected": False, "mcp": "mcp__claude_ai_Notion"},
+    "web":      {"fn": _tool_web_search,          "connected": False, "mcp": "WebSearch"},
 }
 
 
@@ -532,7 +737,7 @@ def _detect_deltas(
 # Phase 1 — per-role data gathering (parallel tool queries)
 # ---------------------------------------------------------------------------
 
-async def _gather_role_data(role: str) -> dict:
+async def _gather_role_data(role: str, context_text: str | None = None) -> dict:
     cfg = ROLE_CONFIGS[role]
     team = cfg["team"]
     team_users = _TEAM_USERS.get(team) if team else None
@@ -546,9 +751,10 @@ async def _gather_role_data(role: str) -> dict:
     rag_task = asyncio.create_task(
         _tool_rag_query(cfg["jira_query"], team, limit=4)
     )
+    calendar_task = asyncio.create_task(_tool_calendar_upcoming(context_text, limit=8))
 
-    slack_results, jira_results, rag_results = await asyncio.gather(
-        slack_task, jira_task, rag_task
+    slack_results, jira_results, rag_results, calendar_results = await asyncio.gather(
+        slack_task, jira_task, rag_task, calendar_task
     )
 
     return {
@@ -557,7 +763,7 @@ async def _gather_role_data(role: str) -> dict:
         "slack_messages": slack_results,
         "jira_tickets":   jira_results,
         "seed_docs":      rag_results,
-        "calendar":       [
+        "calendar":       calendar_results or [
             v for v in CALENDAR.values()
             if team_users is None or any(u in v["attendees"] for u in team_users)
         ],
@@ -579,10 +785,32 @@ _SYNTHESIS_TMPL = """\
 Role: {role}
 Analyst lens: {lens}
 
-Raw data:
-{raw_data}
+The raw_data below was gathered in parallel from four sources simultaneously:
+  • slack_messages — recent channel posts relevant to this role
+  • jira_tickets   — open/blocked tickets assigned to this team
+  • seed_docs      — internal docs (specs, decisions, API contracts, meeting notes)
+  • calendar       — upcoming meetings involving this team
 
-Extract structured status. Return ONLY valid JSON — no markdown, no extra keys:
+Cross-reference all four sources. A claim is stronger when multiple sources agree.
+A blocker in Jira confirmed by a Slack message is high-confidence; a Jira ticket
+with no Slack corroboration is medium-confidence.
+
+Example — how to synthesise from parallel-gathered data:
+  slack_messages: [{{"content": "[#engineering] Derek: checkout API changed /v1→/v2. Filed NOVA-142. Blocker for Monday.", "source_id": "msg_eng_api_change"}}]
+  jira_tickets:   [{{"content": "[NOVA-142] Update launch page integration — BLOCKED critical. Checkout calls old /v1/checkout.", "source_id": "NOVA-142"}}]
+  seed_docs:      [{{"content": "API contract updated 2026-04-25: /v2/checkout is now canonical. /v1 deprecated.", "source_id": "doc_api_contract"}}]
+  → good output:
+  {{
+    "summary": "Engineering is blocked on NOVA-142. The checkout API migrated from /v1 to /v2 overnight; the launch page still calls the old endpoint and will fail at checkout on Monday unless updated.",
+    "blockers": ["NOVA-142: launch page integration not updated for /v2/checkout endpoint"],
+    "claims": [
+      {{"claim": "Checkout endpoint changed from /v1/checkout to /v2/checkout last night.", "source_ids": ["msg_eng_api_change", "NOVA-142", "doc_api_contract"], "confidence": 0.97, "risk": "high"}},
+      {{"claim": "Launch page integration is blocked — will fail at checkout on launch.", "source_ids": ["NOVA-142"], "confidence": 0.95, "risk": "high"}}
+    ]
+  }}
+
+Now synthesise from the actual raw_data below.
+Return ONLY valid JSON — no markdown, no extra keys:
 {{
   "summary": "<one paragraph>",
   "blockers": ["<blocker string>", ...],
@@ -595,6 +823,9 @@ Extract structured status. Return ONLY valid JSON — no markdown, no extra keys
     }}
   ]
 }}
+
+Raw data:
+{raw_data}
 """
 
 
@@ -602,10 +833,9 @@ async def _synthesize_role(role: str, raw: dict) -> dict | None:
     if not _GEMINI_KEY:
         return None
     try:
-        from google import genai
         from google.genai import types as gt
 
-        client = genai.Client(api_key=_GEMINI_KEY)
+        client = _get_gemini_client()
         prompt = _SYNTHESIS_TMPL.format(
             role=role,
             lens=raw["lens"],
@@ -714,11 +944,12 @@ async def _detect_contradictions(responses: list[MeetingResponse]) -> dict:
     # Always run the rule engine first — it's the safety net
     rules = _contradictions_rules(responses)
 
-    if not _GEMINI_KEY:
+    client = _get_gemini_client()
+    if client is None or rules["contradictions"]:
+        # Rules already found contradictions — authoritative, skip the ~20s Gemini call
         return {**rules, "stale_claims": [], "missing_owners": [], "unsupported_claims": rules.get("unsupported_claims", [])}
 
     try:
-        from google import genai
         from google.genai import types as gt
 
         reports_payload = [
@@ -738,7 +969,6 @@ async def _detect_contradictions(responses: list[MeetingResponse]) -> dict:
             }
             for r in responses
         ]
-        client = genai.Client(api_key=_GEMINI_KEY)
         resp = await client.aio.models.generate_content(
             model=_GEMINI_MODEL,
             contents=_CONTRADICTION_TMPL.format(
@@ -822,7 +1052,7 @@ def _build_passports(
 async def on_startup(ctx: Context):
     global _RAG_DOCS
     seed_dir = os.path.normpath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "data", "seed")
+        os.path.join(os.path.dirname(__file__), "..", "..", "data_engineering", "seed")
     )
     for path in glob.glob(os.path.join(seed_dir, "*.json")):
         try:
@@ -862,7 +1092,8 @@ async def handle_full_brief(ctx: Context, sender: str, msg: FullBriefRequest):
         f"user={msg.user_email} | topic='{msg.topic}'"
     )
     try:
-        await _handle_full_brief_inner(ctx, sender, msg)
+        brief = await _run_brief_pipeline(ctx, msg)
+        await ctx.send(sender, brief)
     except Exception as exc:
         ctx.logger.error(f"Pipeline crashed unexpectedly: {exc}", exc_info=True)
         await ctx.send(sender, FullBriefResponse(
@@ -879,10 +1110,18 @@ async def handle_full_brief(ctx: Context, sender: str, msg: FullBriefRequest):
         ))
 
 
-async def _handle_full_brief_inner(ctx: Context, sender: str, msg: FullBriefRequest):
+async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefResponse:
+    import time
+    t_start = time.monotonic()
+
     roles   = msg.roles or ALL_ROLES
     now     = datetime.now(UTC).isoformat()
     session_id = msg.session_id or str(uuid.uuid4())
+
+    ctx.logger.info(
+        f"Pipeline start | id={msg.request_id} | roles={roles} | "
+        f"topic='{msg.topic}' | user={msg.user_email}"
+    )
 
     # ── Load prior brief for delta detection (non-blocking) ──────────────
     last_brief = _load_last_brief(msg.user_email)
@@ -901,26 +1140,46 @@ async def _handle_full_brief_inner(ctx: Context, sender: str, msg: FullBriefRequ
         )
 
     # ── Phase 1: gather raw data per role (parallel) ──────────────────────
-    gather_tasks = {role: asyncio.create_task(_gather_role_data(role)) for role in roles}
+    gather_tasks = {role: asyncio.create_task(_gather_role_data(role, msg.context)) for role in roles}
     raw_data: dict[str, dict] = {}
-    for role, task in gather_tasks.items():
-        try:
-            raw_data[role] = await task
-        except Exception as exc:
-            ctx.logger.warning(f"Data gather failed for {role}: {exc}")
-            raw_data[role] = {"role": role, "lens": ROLE_CONFIGS[role]["lens"],
-                              "slack_messages": [], "jira_tickets": [], "seed_docs": [], "calendar": []}
+    tool_counts: dict[str, int] = {}
+    for role, result in zip(roles, gather_results):
+        if isinstance(result, Exception):
+            ctx.logger.warning(f"Data gather failed for {role}: {result}")
+            raw_data[role] = {
+                "role": role, "lens": ROLE_CONFIGS[role]["lens"],
+                "slack_messages": [], "jira_tickets": [], "seed_docs": [], "calendar": [],
+            }
+            tool_counts[role] = 0
+        else:
+            raw_data[role] = result
+            tool_counts[role] = (
+                len(result.get("slack_messages", [])) +
+                len(result.get("jira_tickets", [])) +
+                len(result.get("seed_docs", []))
+            )
 
-    # ── Phase 2: Gemini synthesis per role (parallel) ─────────────────────
-    synth_tasks = {role: asyncio.create_task(_synthesize_role(role, raw_data[role])) for role in roles}
+    ctx.logger.info(
+        f"Phase 1 done | {t1_ms}ms | results_per_role={tool_counts}"
+    )
+
+    # ── Phase 2: Gemini synthesis — all roles in parallel ────────────────
+    # All synthesis calls fire simultaneously; one slow Gemini response
+    # does not delay the others.
+    t2 = time.monotonic()
+    synth_results = await asyncio.gather(
+        *[_synthesize_role(role, raw_data[role]) for role in roles],
+        return_exceptions=True,
+    )
+    t2_ms = int((time.monotonic() - t2) * 1000)
+    ctx.logger.info(f"Phase 2 done | {t2_ms}ms (Gemini synthesis × {len(roles)} roles)")
+
     role_responses: list[MeetingResponse] = []
     used_fallback = False
 
-    for role, task in synth_tasks.items():
-        try:
-            synth = await task
-        except Exception as exc:
-            ctx.logger.warning(f"Synthesis task raised for {role}: {exc}")
+    for role, synth in zip(roles, synth_results):
+        if isinstance(synth, Exception):
+            ctx.logger.warning(f"Synthesis task raised for {role}: {synth}")
             synth = None
 
         is_fallback = synth is None
@@ -955,10 +1214,16 @@ async def _handle_full_brief_inner(ctx: Context, sender: str, msg: FullBriefRequ
         ))
 
     # ── Phase 3: contradiction detection ─────────────────────────────────
+    t3 = time.monotonic()
     verdict = await _detect_contradictions(role_responses)
-
-    # ── Stale claim detection ──────────────────────────────────────────────
-    stale = _check_stale(role_responses)
+    stale   = _check_stale(role_responses)
+    t3_ms   = int((time.monotonic() - t3) * 1000)
+    ctx.logger.info(
+        f"Phase 3 done | {t3_ms}ms | "
+        f"contradictions={len(verdict['contradictions'])} | "
+        f"escalation={verdict['escalation_required']} | "
+        f"stale={len(stale)}"
+    )
 
     # ── Phase 4: Evidence Passports ────────────────────────────────────────
     passports = _build_passports(
@@ -968,16 +1233,20 @@ async def _handle_full_brief_inner(ctx: Context, sender: str, msg: FullBriefRequ
         verdict["recommended_action"],
     )
 
-    # ── Overall confidence (weighted average across roles) ─────────────────
-    all_claims = [c for r in role_responses for c in r.claims]
+    # ── Overall confidence + delta detection ──────────────────────────────
+    all_claims   = [c for r in role_responses for c in r.claims]
     overall_conf = _weighted_confidence(all_claims) if all_claims else 0.5
+    mode         = "seeded" if used_fallback else "live"
+    deltas       = _detect_deltas(role_responses, previous_roles) if previous_roles else []
 
-    mode = "seeded" if used_fallback else "live"
-
-    # ── Delta detection (what changed since last brief) ───────────────────
-    deltas = _detect_deltas(role_responses, previous_roles) if previous_roles else []
     if deltas:
-        ctx.logger.info(f"Delta detected | {len(deltas)} change(s)")
+        ctx.logger.info(
+            f"Deltas detected | {len(deltas)} change(s) since prior brief:\n"
+            + "\n".join(f"  {d}" for d in deltas[:5])
+            + (f"\n  … +{len(deltas)-5} more" if len(deltas) > 5 else "")
+        )
+
+    t_total_ms = int((time.monotonic() - t_start) * 1000)
 
     brief = FullBriefResponse(
         request_id=msg.request_id,
@@ -1019,14 +1288,13 @@ async def _handle_full_brief_inner(ctx: Context, sender: str, msg: FullBriefRequ
 
     statuses = {r.role: r.status for r in role_responses}
     ctx.logger.info(
-        f"Brief ready | roles={statuses} | "
-        f"contradictions={len(brief.contradictions)} | "
-        f"passports={len(passports)} | "
-        f"escalation={brief.escalation_required} | "
-        f"deltas={len(deltas)} | "
-        f"mode={mode}"
+        f"Brief ready | {t_total_ms}ms total "
+        f"(p1={t1_ms}ms gather, p2={t2_ms}ms synthesis, p3={t3_ms}ms contradict) | "
+        f"roles={statuses} | contradictions={len(brief.contradictions)} | "
+        f"passports={len(passports)} | escalation={brief.escalation_required} | "
+        f"deltas={len(deltas)} | mode={mode}"
     )
-    await ctx.send(sender, brief)
+    return brief
 
 
 @agent.on_message(VerifyRequest)
@@ -1098,6 +1366,94 @@ async def health(ctx: Context) -> _HealthResponse:
         rag_docs=len(_RAG_DOCS),
         timestamp=datetime.now(UTC).isoformat(),
     )
+
+
+# ---------------------------------------------------------------------------
+# HTTP brief endpoint — lets the frontend request a brief without uAgents
+# ---------------------------------------------------------------------------
+
+class _BriefHttpRequest(Model):
+    topic: str
+    user_email: str = "demo@standin.ai"
+    roles: list[str] = []
+
+
+@agent.on_rest_post("/brief", _BriefHttpRequest, FullBriefResponse)
+async def http_brief(ctx: Context, req: _BriefHttpRequest) -> FullBriefResponse:
+    full_req = FullBriefRequest(
+        request_id=str(uuid.uuid4()),
+        user_email=req.user_email,
+        topic=req.topic,
+        roles=req.roles or ALL_ROLES,
+        context="",
+        session_id=req.user_email,
+    )
+    try:
+        return await _run_brief_pipeline(ctx, full_req)
+    except Exception as exc:
+        ctx.logger.error(f"http_brief pipeline error: {exc}", exc_info=True)
+        return FullBriefResponse(
+            request_id=full_req.request_id,
+            user_email=full_req.user_email,
+            role_statuses=[], contradictions=[], stale_claims=[],
+            unsupported_claims=[], evidence_passports=[],
+            escalation_required=False,
+            escalation_reason=f"Pipeline error: {exc}",
+            recommended_action="Retry the request.",
+            overall_confidence=0.0,
+            mode="error",
+            session_id=full_req.session_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# HTTP briefs list — recent brief history for the dashboard
+# ---------------------------------------------------------------------------
+
+class _BriefSummary(Model):
+    request_id: str
+    user_email: str
+    topic: str
+    overall_confidence: float
+    escalation_required: bool
+    mode: str
+    saved_at: str
+
+
+class _BriefListResponse(Model):
+    count: int
+    briefs: list[_BriefSummary]
+
+
+@agent.on_rest_get("/briefs", _BriefListResponse)
+async def list_briefs(ctx: Context) -> _BriefListResponse:
+    if not _MONGODB_URI:
+        return _BriefListResponse(count=0, briefs=[])
+    try:
+        db   = _get_db()
+        docs = list(
+            db["brief_history"].find(
+                {},
+                {"_id": 0, "request_id": 1, "user_email": 1, "topic": 1,
+                 "overall_confidence": 1, "escalation_required": 1, "mode": 1, "saved_at": 1},
+            ).sort("saved_at", -1).limit(10)
+        )
+        briefs = [
+            _BriefSummary(
+                request_id=d.get("request_id", ""),
+                user_email=d.get("user_email", ""),
+                topic=d.get("topic", ""),
+                overall_confidence=float(d.get("overall_confidence", 0.5)),
+                escalation_required=bool(d.get("escalation_required", False)),
+                mode=d.get("mode", ""),
+                saved_at=d.get("saved_at", ""),
+            )
+            for d in docs
+        ]
+        return _BriefListResponse(count=len(briefs), briefs=briefs)
+    except Exception as exc:
+        ctx.logger.warning(f"list_briefs failed: {exc}")
+        return _BriefListResponse(count=0, briefs=[])
 
 
 if __name__ == "__main__":

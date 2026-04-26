@@ -1,0 +1,1 @@
+# StandIn service adapters

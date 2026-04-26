@@ -11,9 +11,9 @@ function HealthBar({ route, setRoute, counts }) {
   const source = window.MOCK_API.getSource();
 
   const tabs = [
-    { id: 'attention', label: 'Attention',     count: counts.attention },
-    { id: 'graph',     label: 'Team graph',    count: counts.graph },
-    { id: 'monitor',   label: 'Orchestration', count: counts.feed },
+    { id: 'attention', label: 'Attention',     count: counts.attention, kbd: '1' },
+    { id: 'graph',     label: 'Team graph',    count: counts.graph,     kbd: '2' },
+    { id: 'monitor',   label: 'Orchestration', count: counts.feed,      kbd: '3' },
   ];
 
   return (
@@ -31,6 +31,7 @@ function HealthBar({ route, setRoute, counts }) {
                   aria-current={route === t.id ? 'page' : undefined}>
             {t.label}
             <span className="count tabular">{t.count}</span>
+            <span className="nav-kbd">{t.kbd}</span>
           </button>
         ))}
       </nav>
@@ -124,9 +125,12 @@ function App() {
       <HealthBar route={route} setRoute={setRoute} counts={counts}/>
       <div className="body">
         <main className="main" data-screen-label={`Route ${route}`}>
-          {route === 'attention' && <AttentionBoard tweaks={{ activateTrace }}/>}
-          {route === 'graph'     && <TeamGraph tweaks={{ openNode, clearOpenNode: () => setOpenNode(null) }}/>}
-          {route === 'monitor'   && <OrchestrationMonitor activeTrace={activeTrace}/>}
+          {/* AttentionBoard stays mounted so async query state survives the Orchestration redirect */}
+          <div style={{ display: route === 'attention' ? 'contents' : 'none' }}>
+            <AttentionBoard tweaks={{ activateTrace, navigateToMonitor: () => setRoute('monitor'), navigateToAttention: () => setRoute('attention') }}/>
+          </div>
+          {route === 'graph'   && <TeamGraph tweaks={{ openNode, clearOpenNode: () => setOpenNode(null) }}/>}
+          {route === 'monitor' && <OrchestrationMonitor activeTrace={activeTrace}/>}
         </main>
       </div>
 

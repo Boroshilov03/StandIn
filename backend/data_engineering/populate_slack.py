@@ -1,0 +1,39 @@
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from services.slackService import _get_db, postAsUser  # noqa: E402
+
+
+def run() -> None:
+    db = _get_db()
+    channels = {
+        doc["channelId"]: doc.get("slackChannelId")
+        for doc in db["slack_channels"].find({}, {"_id": 0, "channelId": 1, "slackChannelId": 1})
+    }
+    cursor = db["slack_messages"].find({}).sort("timestamp", 1)
+
+    posted = 0
+    failed = 0
+    for message in cursor:
+        channel_id = channels.get(message.get("channelId")) or message.get("channelId")
+        try:
+            postAsUser(
+                userId=message["userId"],
+                text=message["text"],
+                channelId=channel_id,
+            )
+            posted += 1
+            print(f"Posted {message.get('_id', '<no-id>')} -> {channel_id}")
+        except Exception as exc:
+            failed += 1
+            print(f"Failed {message.get('_id', '<no-id>')}: {exc}")
+
+    print(f"populateSlackService complete: posted={posted}, failed={failed}")
+
+
+if __name__ == "__main__":
+    run()

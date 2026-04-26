@@ -122,7 +122,9 @@ class InfoResponse(Model):
 class ActionRequest(Model):
     request_id: str
     action_type: str    # "send_email" | "send_slack" | "create_jira"
-                        # | "schedule_meeting" | "create_action_item"
+                        # | "schedule_meeting" | "read_calendar_events"
+                        # | "create_action_item"
+    # payload: JSON dict — send_slack uses { text, channel?, user_id? }; user_id may be omitted if owner is set
     payload: str        # JSON-serialised dict — caller must json.dumps()
     context: Optional[str] = None
     priority: Optional[str] = "normal"  # "normal" | "urgent"
@@ -300,3 +302,21 @@ class GraphResponse(Model):
     edges: List[GraphEdge]
     generated_at: str
     source: str         # "mongodb" | "hardcoded"
+
+
+# ---------------------------------------------------------------------------
+# Action log feed  (served via GET /log on perform_action)
+# ---------------------------------------------------------------------------
+
+class FeedEntry(Model):
+    ts: str
+    agent: str
+    tool: str
+    status: str          # "DONE" | "FAIL" | "STUB" | "PENDING"
+    stub: bool = False
+    meta: Optional[str] = None
+
+
+class FeedResponse(Model):
+    entries: List[FeedEntry]
+    source: str          # "mongodb" | "fallback"

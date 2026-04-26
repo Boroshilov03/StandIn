@@ -35,6 +35,7 @@ env/
 # Environment variables
 .env
 .env.local
+client_secret.json
 
 # OS
 .DS_Store

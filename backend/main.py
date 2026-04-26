@@ -1,11 +1,20 @@
 """Run the StandIn agent topology locally with a Bureau."""
 
 import asyncio
+import logging
 import os
 
 from dotenv import load_dotenv
 from uagents import Agent, Bureau
 from uagents_core.types import AgentInfo
+
+# Suppress noisy third-party loggers before any agents are imported
+logging.getLogger("google_genai").setLevel(logging.WARNING)
+logging.getLogger("google.genai").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("pymongo").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 # Load .env first so user-defined addresses take priority
 load_dotenv()
@@ -37,36 +46,55 @@ _patch_agent_info()
 from agents.status_agent.agent import agent as status_agent
 from agents.historical_agent.agent import agent as historical_agent
 from agents.perform_action.agent import agent as perform_action_agent
-
-# Wire sub-agent addresses into env vars BEFORE importing orchestrator.
-# os.environ.setdefault only sets if NOT already present (from .env or shell),
-# so Agentverse addresses in .env always take priority over local addresses.
-os.environ.setdefault("STATUS_AGENT_ADDRESS", status_agent.address)
-os.environ.setdefault("HISTORICAL_AGENT_ADDRESS", historical_agent.address)
-os.environ.setdefault("PERFORM_ACTION_ADDRESS", perform_action_agent.address)
-
-# Now import orchestrator — it reads the addresses we just wired
-from agents.orchestrator.agent import orchestrator
+from agents.status_agent.agent import agent as status_agent
+# from agents.watchdog_agent.agent import agent as watchdog_agent  # disabled
 
 BUREAU_PORT = int(os.getenv("BUREAU_PORT", "8000"))
 
 
+def _normalize_submit_endpoint(raw_endpoint: str | None, port: int) -> str:
+    if raw_endpoint:
+        endpoint = raw_endpoint.rstrip("/")
+        if endpoint.endswith("/submit"):
+            return endpoint
+        return f"{endpoint}/submit"
+    return f"http://localhost:{port}/submit"
+
+
+def _resolve_public_endpoint(port: int) -> str:
+    explicit = os.getenv("BUREAU_ENDPOINT")
+    public_base = os.getenv("PUBLIC_BASE_URL")
+    return _normalize_submit_endpoint(explicit or public_base, port)
+
+
+def _resolve_agentverse() -> str | None:
+    agentverse = os.getenv("AGENTVERSE_URL")
+    if not agentverse:
+        return None
+    return agentverse.rstrip("/")
+
+
 def main():
+    public_endpoint = _resolve_public_endpoint(BUREAU_PORT)
+    agentverse_url = _resolve_agentverse()
     bureau = Bureau(
         port=BUREAU_PORT,
-        endpoint=[f"http://localhost:{BUREAU_PORT}/submit"],
+        endpoint=[public_endpoint],
+        agentverse=agentverse_url,
     )
     bureau.add(orchestrator)
     bureau.add(status_agent)
     bureau.add(historical_agent)
     bureau.add(perform_action_agent)
+    # bureau.add(watchdog_agent)  # disabled
 
     print("\n=== StandIn Topology ===")
     print(f"  Bureau Port:      {BUREAU_PORT}")
-    print(f"  Orchestrator:     {orchestrator.address}")
-    print(f"  Status Agent:     {status_agent.address}")
-    print(f"  Historical:       {historical_agent.address}")
-    print(f"  Perform Action:   {perform_action_agent.address}")
+    print(f"  Public Submit:    {public_endpoint}")
+    print(f"  Orchestrator:    {orchestrator.address}")
+
+    if agentverse_url:
+        print(f"  Agentverse URL:   {agentverse_url}")
     print("========================\n")
 
     bureau.run()

@@ -24,7 +24,8 @@ import logging
 import os
 import sys
 import uuid
-from datetime import datetime, UTC
+from datetime import datetime, timedelta, UTC
+from pathlib import Path
 
 from dotenv import load_dotenv
 from uagents import Agent, Context, Model
@@ -33,17 +34,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
+<<<<<<< HEAD
 try:
     asyncio.get_event_loop()
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
 from data.company_data import CALENDAR, JIRA, SLACK, USERS
+=======
+from data_engineering.company_data import CALENDAR, JIRA, SLACK, USERS
+>>>>>>> main
 from models import (
     ActionRequest,
     ActionResponse,
     ApproveRequest,
     ApproveResponse,
+    FeedEntry,
+    FeedResponse,
     GraphEdge,
     GraphNode,
     GraphResponse,
@@ -52,6 +59,23 @@ from models import (
     RejectRequest,
     RejectResponse,
 )
+
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    from services.calendar_service import create_event
+    from services.calendar_service import add_reminder as add_calendar_reminder
+    from services.calendar_service import get_event as get_calendar_event
+    from services.calendar_service import list_events as list_calendar_events
+    from services.slackService import postAsUser, postAsBot
+except Exception:
+    create_event = None
+    add_calendar_reminder = None
+    get_calendar_event = None
+    list_calendar_events = None
+    postAsUser = None
 
 # ---------------------------------------------------------------------------
 # Agent
@@ -66,7 +90,10 @@ agent = Agent(
     name="perform_action",
     seed=_SEED,
     port=_PORT,
+<<<<<<< HEAD
     endpoint=[_ENDPOINT],
+=======
+>>>>>>> main
     mailbox=False,
     publish_agent_details=False,
 )
@@ -188,33 +215,73 @@ async def _action_send_email(action_id: str, payload: dict, priority: str) -> tu
 
 async def _action_send_slack(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
     """
-    STUB — mcp__claude_ai_Slack__slack_send_message
-    Connect: call slack_send_message(channel=..., text=...).
+    Live Slack send via chat.postMessage (top-level only; no threads).
 
-    payload: { channel: str, text: str, thread_ts?: str }
+    payload: { text: str, channel?: str, user_id?: str }
+    channel: optional slack_channels key (channelId, #name, or slackChannelId); defaults to #standin-updates.
+    user_id: users._id (e.g. user_alice). Caller may merge ActionRequest.owner into payload before invoke.
     """
-    channel = payload.get("channel", "#general")
-    text    = payload.get("text", "")[:80]
-    _LOGGER.info(
-        f"[STUB] send_slack | channel={channel} | text='{text}...' | "
-        f"priority={priority} — Slack MCP not connected"
-    )
-    result = f"[stub] Slack message to {channel} queued."
-    return True, result, True
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return False, "send_slack requires non-empty payload.text", False
+
+    user_id = (payload.get("user_id") or "").strip()
+    if not user_id:
+        return False, "send_slack requires user_id (users._id, e.g. user_alice).", False
+
+    raw_ch = payload.get("channel")
+    channel_key = None
+    if isinstance(raw_ch, str):
+        channel_key = raw_ch.strip() or None
+    elif raw_ch is not None:
+        channel_key = str(raw_ch).strip() or None
+
+    if postAsUser is None:
+        return False, "Slack service unavailable (missing dependencies or import path).", True
+    if not _MONGODB_URI:
+        return False, "send_slack requires MONGODB_URI for channel and user lookup.", True
+
+    try:
+        response = postAsUser(user_id, text, channel_key)
+        ts = response.get("ts", "unknown")
+        resolved = response.get("channel", channel_key or "default")
+        result = f"Slack message posted as {user_id} to channel={resolved}. ts={ts}"
+        return True, result, False
+    except (ValueError, RuntimeError) as exc:
+        return False, str(exc), False
+    except Exception as exc:
+        return False, f"Slack send failed: {exc}", False
 
 
 async def _action_draft_slack(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
     """
-    STUB — mcp__claude_ai_Slack__slack_send_message_draft
-    Connect: call slack_send_message_draft(channel=..., text=...).
-    Useful for escalation notices that need human approval before sending.
+    Post a draft/automated Slack message as the StandIn bot (no human approval gate).
+    Used for watchdog alerts and escalation notices.
 
-    payload: { channel: str, text: str }
+    payload: { text: str, channel?: str }
     """
-    channel = payload.get("channel", "#general")
-    _LOGGER.info(f"[STUB] draft_slack | channel={channel} — Slack MCP not connected")
-    result = f"[stub] Slack draft for {channel} created (pending approval)."
-    return True, result, True
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return False, "draft_slack requires non-empty payload.text", False
+
+    raw_ch = payload.get("channel")
+    channel_key = raw_ch.strip() if isinstance(raw_ch, str) else None
+
+    if postAsBot is None:
+        return False, "Slack service unavailable (import failed).", True
+    if not _MONGODB_URI:
+        return False, "draft_slack requires MONGODB_URI for channel lookup.", True
+
+    try:
+        response = postAsBot(text, channel_key)
+        ts       = response.get("ts", "unknown")
+        resolved = response.get("channel", channel_key or "default")
+        result   = f"Draft Slack message (bot) posted to channel={resolved}. ts={ts}"
+        return True, result, False
+    except (ValueError, RuntimeError) as exc:
+        return False, str(exc), False
+    except Exception as exc:
+        return False, f"draft_slack failed: {exc}", False
 
 
 async def _action_create_jira(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
@@ -259,15 +326,115 @@ async def _action_schedule_meeting(action_id: str, payload: dict, priority: str)
 
     payload: { title: str, attendees: list[str], start_time: str, duration_minutes: int, description?: str }
     """
-    title     = payload.get("title", "Meeting")
-    attendees = payload.get("attendees", [])
-    start     = payload.get("start_time", "")
-    _LOGGER.info(
-        f"[STUB] schedule_meeting | title='{title}' | attendees={attendees} | "
-        f"start={start} — Google Calendar MCP not connected"
-    )
-    result = f"[stub] '{title}' with {attendees} at {start} would be scheduled."
-    return True, result, True
+    if create_event is None:
+        result = "Calendar service unavailable (missing dependencies or import path)."
+        return False, result, True
+    try:
+        start_time = payload.get("start_time")
+        end_time = payload.get("end_time")
+        duration_minutes = int(payload.get("duration_minutes") or 0)
+        if start_time and not end_time and duration_minutes > 0:
+            start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+            end_time = (start_dt + timedelta(minutes=duration_minutes)).isoformat()
+
+        event_details = {
+            "summary": payload.get("title", "Meeting"),
+            "description": payload.get("description", ""),
+            "start": start_time,
+            "end": end_time,
+            "timezone": payload.get("time_zone", "UTC"),
+            "attendees": payload.get("attendees", []),
+            "reminders": payload.get("reminders", []),
+        }
+        if not event_details["start"] or not event_details["end"]:
+            return False, "schedule_meeting requires start_time and end_time (or duration_minutes).", False
+
+        created = create_event(event_details)
+        payload["calendar_event_id"] = created.get("id")
+        payload["calendar_html_link"] = created.get("htmlLink")
+        result = f"Calendar event created. eventId={created.get('id')}"
+        return True, result, False
+    except Exception as exc:
+        return False, f"Calendar scheduling failed: {exc}", False
+
+
+async def _action_add_calendar_reminder(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
+    """
+    Adds or updates reminders on an existing Google Calendar event.
+
+    payload: { event_id: str, reminders: list[dict] }
+    """
+    _ = action_id
+    _ = priority
+    if add_calendar_reminder is None:
+        result = "Calendar service unavailable (missing dependencies or import path)."
+        return False, result, True
+
+    event_id = (payload.get("event_id") or "").strip()
+    reminders = payload.get("reminders", [])
+    if not event_id:
+        return False, "add_calendar_reminder requires payload.event_id", False
+    if not isinstance(reminders, list) or not reminders:
+        return False, "add_calendar_reminder requires a non-empty payload.reminders list", False
+
+    try:
+        updated = add_calendar_reminder(event_id, reminders)
+        payload["calendar_event_id"] = updated.get("id", event_id)
+        payload["calendar_html_link"] = updated.get("htmlLink")
+        result = f"Calendar reminders updated. eventId={event_id}"
+        return True, result, False
+    except Exception as exc:
+        return False, f"Calendar reminder update failed: {exc}", False
+
+
+def _compact_calendar_event(event: dict) -> dict:
+    return {
+        "id": event.get("id", ""),
+        "summary": event.get("summary", ""),
+        "description": event.get("description", ""),
+        "start": event.get("start", {}),
+        "end": event.get("end", {}),
+        "attendees": event.get("attendees", []),
+        "htmlLink": event.get("htmlLink", ""),
+        "status": event.get("status", ""),
+    }
+
+
+async def _action_read_calendar_events(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
+    """
+    Read Google Calendar events.
+
+    payload:
+    - list mode: { time_min?: str, time_max?: str, max_results?: int, query?: str }
+    - single mode: { event_id: str }
+    """
+    _ = action_id
+    _ = priority
+    if list_calendar_events is None or get_calendar_event is None:
+        result = "Calendar service unavailable (missing dependencies or import path)."
+        return False, result, True
+
+    try:
+        event_id = (payload.get("event_id") or "").strip()
+        if event_id:
+            event = get_calendar_event(event_id)
+            payload["event"] = _compact_calendar_event(event)
+            result = json.dumps({"mode": "single", "event": payload["event"]})
+            return True, result, False
+
+        events = list_calendar_events(
+            time_min=payload.get("time_min") or payload.get("timeMin"),
+            time_max=payload.get("time_max") or payload.get("timeMax"),
+            max_results=int(payload.get("max_results", 10)),
+            query=payload.get("query"),
+        )
+        compact_events = [_compact_calendar_event(event) for event in events]
+        payload["events"] = compact_events
+        payload["event_count"] = len(compact_events)
+        result = json.dumps({"mode": "list", "count": len(compact_events), "events": compact_events})
+        return True, result, False
+    except Exception as exc:
+        return False, f"Calendar read failed: {exc}", False
 
 
 async def _action_create_action_item(action_id: str, payload: dict, priority: str) -> tuple[bool, str, bool]:
@@ -340,6 +507,9 @@ _ACTIONS: dict[str, object] = {
     "create_jira":         _action_create_jira,
     "update_jira_status":  _action_update_jira_status,
     "schedule_meeting":    _action_schedule_meeting,
+    "add_calendar_reminder": _action_add_calendar_reminder,
+    "read_calendar_events": _action_read_calendar_events,
+    "read_calendar_event": _action_read_calendar_events,
     "create_action_item":  _action_create_action_item,
     "post_brief":          _action_post_brief,
 }
@@ -463,13 +633,19 @@ async def _handle_action_inner(ctx: Context, sender: str, msg: ActionRequest):
         return
 
     # ── Immediate execution ────────────────────────────────────────────────
+    exec_payload = payload
+    if msg.action_type == "send_slack":
+        exec_payload = dict(payload)
+        if not (exec_payload.get("user_id") or "").strip() and (msg.owner or "").strip():
+            exec_payload["user_id"] = msg.owner.strip()
+
     try:
-        success, result, stub = await handler(action_id, payload, priority)
+        success, result, stub = await handler(action_id, exec_payload, priority)
     except Exception as exc:
         ctx.logger.error(f"Action '{msg.action_type}' raised unexpectedly: {exc}")
         success, result, stub = False, str(exc), True
 
-    _log_action(action_id, msg.action_type, payload, success, result, stub)
+    _log_action(action_id, msg.action_type, exec_payload, success, result, stub)
 
     response = ActionResponse(
         request_id=msg.request_id,
@@ -545,7 +721,7 @@ async def approve_action(ctx: Context, req: ApproveRequest) -> ApproveResponse:
             )
 
         action_type = doc["action_type"]
-        payload     = doc.get("payload", {})
+        payload     = dict(doc.get("payload") or {})
         priority    = doc.get("priority", "normal")
         handler     = _ACTIONS.get(action_type)
 
@@ -554,6 +730,10 @@ async def approve_action(ctx: Context, req: ApproveRequest) -> ApproveResponse:
                 action_id=req.action_id, action_type=action_type,
                 approved=False, error=f"No handler for '{action_type}'",
             )
+
+        if action_type == "send_slack":
+            if not (payload.get("user_id") or "").strip() and (doc.get("owner") or "").strip():
+                payload["user_id"] = doc["owner"].strip()
 
         success, result, _ = await handler(req.action_id, payload, priority)
         _mark_approval_done(req.action_id, approved=success, result=result)
@@ -680,7 +860,7 @@ async def get_graph(ctx: Context) -> GraphResponse:
 
     if not _MONGODB_URI:
         nodes, edges = _build_graph_from_hardcoded()
-        ctx.logger.info(f"Graph (hardcoded) | {len(nodes)} nodes | {len(edges)} edges")
+        ctx.logger.debug(f"Graph (hardcoded) | {len(nodes)} nodes | {len(edges)} edges")
         return GraphResponse(nodes=nodes, edges=edges, generated_at=now, source="hardcoded")
 
     try:
@@ -717,13 +897,50 @@ async def get_graph(ctx: Context) -> GraphResponse:
                 }
 
         edges = [GraphEdge(**e) for e in edge_map.values()]
-        ctx.logger.info(f"Graph (mongodb) | {len(nodes)} nodes | {len(edges)} edges")
+        ctx.logger.debug(f"Graph (mongodb) | {len(nodes)} nodes | {len(edges)} edges")
         return GraphResponse(nodes=nodes, edges=edges, generated_at=now, source="mongodb")
 
     except Exception as exc:
         ctx.logger.warning(f"Graph MongoDB read failed, falling back: {exc}")
         nodes, edges = _build_graph_from_hardcoded()
         return GraphResponse(nodes=nodes, edges=edges, generated_at=now, source="hardcoded")
+
+
+# ---------------------------------------------------------------------------
+# Action log feed endpoint — used by dashboard pipeline trace
+# ---------------------------------------------------------------------------
+
+@agent.on_rest_get("/log", FeedResponse)
+async def get_log(ctx: Context) -> FeedResponse:
+    """
+    Returns the 30 most-recent action_log entries for the dashboard feed.
+    Falls back to empty list when MongoDB is not configured.
+    """
+    if not _MONGODB_URI:
+        return FeedResponse(entries=[], source="fallback")
+    try:
+        db = _get_db()
+        docs = list(
+            db["action_log"]
+            .find({}, {"_id": 0})
+            .sort("created_at", -1)
+            .limit(30)
+        )
+        entries = [
+            FeedEntry(
+                ts=doc.get("created_at", ""),
+                agent="perform_action",
+                tool=doc.get("action_type", "unknown"),
+                status="DONE" if doc.get("success") else "FAIL",
+                stub=bool(doc.get("stub", True)),
+                meta=(doc.get("result") or "")[:60],
+            )
+            for doc in docs
+        ]
+        return FeedResponse(entries=entries, source="mongodb")
+    except Exception as exc:
+        ctx.logger.warning(f"log endpoint failed: {exc}")
+        return FeedResponse(entries=[], source="fallback")
 
 
 # ---------------------------------------------------------------------------
