@@ -18,6 +18,7 @@ calls the REST endpoints to approve or reject:
 
 Run: python backend/agents/perform_action/agent.py
 """
+import asyncio
 import json
 import logging
 import os
@@ -31,6 +32,11 @@ from uagents import Agent, Context, Model
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
+
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 from data.company_data import CALENDAR, JIRA, SLACK, USERS
 from models import (
@@ -52,6 +58,7 @@ from models import (
 # ---------------------------------------------------------------------------
 _SEED = os.getenv("PERFORM_ACTION_SEED", "perform_action_standin_seed_v1")
 _PORT = int(os.getenv("PERFORM_ACTION_PORT", "8008"))
+_ENDPOINT = os.getenv("PERFORM_ACTION_ENDPOINT", f"http://127.0.0.1:{_PORT}/submit")
 _MONGODB_URI = os.getenv("MONGODB_URI", "")
 _LOGGER = logging.getLogger("perform_action")
 
@@ -59,8 +66,9 @@ agent = Agent(
     name="perform_action",
     seed=_SEED,
     port=_PORT,
-    mailbox=True,
-    publish_agent_details=True,
+    endpoint=[_ENDPOINT],
+    mailbox=False,
+    publish_agent_details=False,
 )
 
 

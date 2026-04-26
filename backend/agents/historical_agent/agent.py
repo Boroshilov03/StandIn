@@ -17,6 +17,7 @@ To activate Tier 1:
 Run: python backend/agents/historical_agent/agent.py
 """
 
+import asyncio
 import glob
 import json
 import math
@@ -32,6 +33,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from data.company_data import CALENDAR, JIRA, SLACK, USERS
 from models import RAGRequest, RAGResponse
 
@@ -40,6 +46,7 @@ from models import RAGRequest, RAGResponse
 # ---------------------------------------------------------------------------
 _SEED = os.getenv("HISTORICAL_AGENT_SEED", "historical_agent_standin_seed_v1")
 _PORT = int(os.getenv("HISTORICAL_AGENT_PORT", "8009"))
+_ENDPOINT = os.getenv("HISTORICAL_AGENT_ENDPOINT", f"http://127.0.0.1:{_PORT}/submit")
 _GEMINI_KEY   = os.getenv("GEMINI_API_KEY", "")
 _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _MONGODB_URI  = os.getenv("MONGODB_URI", "")
@@ -50,8 +57,9 @@ agent = Agent(
     name="historical_agent",
     seed=_SEED,
     port=_PORT,
-    mailbox=True,
-    publish_agent_details=True,
+    endpoint=[_ENDPOINT],
+    mailbox=False,
+    publish_agent_details=False,
 )
 
 _SYSTEM = (

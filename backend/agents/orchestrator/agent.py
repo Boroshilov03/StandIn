@@ -1,20 +1,22 @@
 """
-Chat Protocol orchestrator for StandIn.
+StandIn Orchestrator — Chat Protocol agent for ASI:One / Agentverse.
 
-Invoked by ASI:One / Agentverse and routes requests to:
-- status_agent       for status, conflict, and briefing intents
-- historical_agent   for historical questions
-- perform_action     for action requests
+Receives user messages via Chat Protocol, classifies intent, and routes to:
+  - status_agent       -> current status, contradictions, executive briefings
+  - historical_agent   -> past decisions, document history
+  - perform_action     -> create Jira, send Slack, schedule meetings, etc.
+
+Only the orchestrator exposes Chat Protocol. Sub-agents use typed uAgents messages.
 """
 
 import json
-import logging
 import os
 import re
 import sys
 import uuid
 import asyncio
-from datetime import UTC, datetime
+import logging
+from datetime import datetime, UTC
 
 from dotenv import load_dotenv
 from uagents import Agent, Context, Protocol
@@ -26,8 +28,6 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-
 load_dotenv()
 
 try:
@@ -35,9 +35,7 @@ try:
 except RuntimeError:
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-from agents.historical_agent.agent import agent as historical_agent
-from agents.perform_action.agent import agent as perform_action_agent
-from agents.status_agent.agent import agent as status_agent
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from models import (
     ActionRequest,
     ActionResponse,
@@ -48,25 +46,53 @@ from models import (
     RAGResponse,
 )
 
-_SEED = os.getenv("ORCHESTRATOR_SEED", "standin_orchestrator_seed_v1")
-_PORT = int(os.getenv("ORCHESTRATOR_PORT", "8000"))
-_GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
-_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _LOGGER = logging.getLogger("standin_orchestrator")
+
+# ---------------------------------------------------------------------------
+# Agent
+# ---------------------------------------------------------------------------
+ORCHESTRATOR_SEED = os.getenv("ORCHESTRATOR_SEED", "standin_orchestrator_seed_v1")
 
 orchestrator = Agent(
     name="standin_orchestrator",
-    seed=_SEED,
-    port=_PORT,
+    seed=ORCHESTRATOR_SEED,
+    port=8000,
     mailbox=True,
     publish_agent_details=True,
 )
 
-chat_protocol = Protocol(spec=chat_protocol_spec)
+# ---------------------------------------------------------------------------
+# Sub-agent addresses — paste after registering each on Agentverse
+# Set these in your .env file:
+#   STATUS_AGENT_ADDRESS=agent1q...
+#   HISTORICAL_AGENT_ADDRESS=agent1q...
+#   PERFORM_ACTION_ADDRESS=agent1q...
+# ---------------------------------------------------------------------------
+STATUS_AGENT_ADDRESS = os.getenv("STATUS_AGENT_ADDRESS", "")
+HISTORICAL_AGENT_ADDRESS = os.getenv("HISTORICAL_AGENT_ADDRESS", "")
+PERFORM_ACTION_ADDRESS = os.getenv("PERFORM_ACTION_ADDRESS", "")
 
-STATUS_AGENT_ADDRESS = os.getenv("STATUS_AGENT_ADDRESS", status_agent.address)
-HISTORICAL_AGENT_ADDRESS = os.getenv("HISTORICAL_AGENT_ADDRESS", historical_agent.address)
-PERFORM_ACTION_ADDRESS = os.getenv("PERFORM_ACTION_ADDRESS", perform_action_agent.address)
+# ---------------------------------------------------------------------------
+# Gemini for intent classification
+# ---------------------------------------------------------------------------
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+# ---------------------------------------------------------------------------
+# Chat Protocol
+# ---------------------------------------------------------------------------
+chat_proto = Protocol(spec=chat_protocol_spec)
+
+# Async response routing: request_id -> {sender, intent}
+pending_requests: dict[str, dict] = {}
+
+# Session memory for status_agent conversation threading
+status_sessions: dict[str, str] = {}
+
+
+# ---------------------------------------------------------------------------
+# Intent classification helpers
+# ---------------------------------------------------------------------------
 
 TEAM_ALIASES = {
     "engineering": "Engineering",
@@ -88,9 +114,6 @@ ACTION_HINTS = {
     "create_action_item": ("action item", "todo", "task"),
     "post_brief": ("post brief", "save brief", "publish brief"),
 }
-
-pending_requests: dict[str, dict] = {}
-status_sessions: dict[str, str] = {}
 
 _CLASSIFIER_PROMPT = """
 You classify user requests for a coordination orchestrator.
@@ -119,14 +142,6 @@ Rules:
 """.strip()
 
 
-def _extract_text(msg: ChatMessage) -> str:
-    chunks: list[str] = []
-    for item in msg.content:
-        if isinstance(item, TextContent):
-            chunks.append(item.text)
-    return " ".join(chunks).strip()
-
-
 def _detect_teams(text: str) -> list[str]:
     lowered = text.lower()
     teams: list[str] = []
@@ -139,15 +154,10 @@ def _detect_teams(text: str) -> list[str]:
 def _extract_time_window(text: str) -> str | None:
     lowered = text.lower()
     for token in (
-        "today",
-        "tomorrow",
-        "yesterday",
-        "this week",
-        "last week",
-        "this month",
-        "last month",
-        "this quarter",
-        "last quarter",
+        "today", "tomorrow", "yesterday",
+        "this week", "last week",
+        "this month", "last month",
+        "this quarter", "last quarter",
     ):
         if token in lowered:
             return token
@@ -239,16 +249,16 @@ def _fallback_classification(text: str) -> IntentClassification:
 
 
 async def _classify(text: str) -> IntentClassification:
-    if not _GEMINI_KEY:
+    if not GEMINI_API_KEY:
         return _fallback_classification(text)
 
     try:
         from google import genai
         from google.genai import types as gt
 
-        client = genai.Client(api_key=_GEMINI_KEY)
+        client = genai.Client(api_key=GEMINI_API_KEY)
         resp = await client.aio.models.generate_content(
-            model=_GEMINI_MODEL,
+            model=GEMINI_MODEL,
             contents=f"User request:\n{text}",
             config=gt.GenerateContentConfig(
                 system_instruction=_CLASSIFIER_PROMPT,
@@ -276,9 +286,9 @@ async def _classify(text: str) -> IntentClassification:
         return _fallback_classification(text)
 
 
-def _briefing_roles(classification: IntentClassification) -> list[str] | None:
-    return classification.teams or None
-
+# ---------------------------------------------------------------------------
+# Response formatters
+# ---------------------------------------------------------------------------
 
 def _format_status_response(msg: FullBriefResponse, intent: str) -> str:
     lines = [
@@ -337,7 +347,11 @@ def _format_action_response(msg: ActionResponse) -> str:
     return msg.error or f"Action {msg.action_type} failed."
 
 
-async def _send_chat_reply(ctx: Context, recipient: str, text: str) -> None:
+# ---------------------------------------------------------------------------
+# Helper: send a chat reply back to the user
+# ---------------------------------------------------------------------------
+
+async def _send_reply(ctx: Context, recipient: str, text: str) -> None:
     await ctx.send(
         recipient,
         ChatMessage(
@@ -351,8 +365,13 @@ async def _send_chat_reply(ctx: Context, recipient: str, text: str) -> None:
     )
 
 
-@chat_protocol.on_message(ChatMessage)
-async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
+# ---------------------------------------------------------------------------
+# Chat Protocol handlers
+# ---------------------------------------------------------------------------
+
+@chat_proto.on_message(ChatMessage)
+async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
+    # Send acknowledgement
     await ctx.send(
         sender,
         ChatAcknowledgement(
@@ -361,12 +380,19 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
         ),
     )
 
-    user_text = _extract_text(msg)
-    if not user_text:
-        await _send_chat_reply(ctx, sender, "I did not receive any text to route.")
+    # Extract text from message content
+    text = ""
+    for item in msg.content:
+        if isinstance(item, TextContent):
+            text += item.text
+
+    text = text.strip()
+    if not text:
+        await _send_reply(ctx, sender, "I did not receive any text to route.")
         return
 
-    classification = await _classify(user_text)
+    # Classify intent using Gemini (or keyword fallback)
+    classification = await _classify(text)
     request_id = str(uuid.uuid4())
 
     pending_requests[request_id] = {
@@ -375,12 +401,16 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
     }
 
     ctx.logger.info(
-        "Classified request | "
-        f"id={request_id} | intent={classification.intent} | teams={classification.teams} | "
-        f"topic={classification.topic} | action_type={classification.action_type}"
+        f"Classified | id={request_id} | intent={classification.intent} | "
+        f"teams={classification.teams} | action={classification.action_type}"
     )
 
-    if classification.intent in {"status_query", "conflict_check", "briefing_request"}:
+    # Route to the appropriate sub-agent
+    if classification.intent in ("status_query", "conflict_check", "briefing_request"):
+        if not STATUS_AGENT_ADDRESS:
+            pending_requests.pop(request_id, None)
+            await _send_reply(ctx, sender, "Status agent address not configured.")
+            return
         session_id = status_sessions.get(sender)
         await ctx.send(
             STATUS_AGENT_ADDRESS,
@@ -388,20 +418,24 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
                 request_id=request_id,
                 user_email=sender,
                 topic=classification.topic,
-                roles=_briefing_roles(classification),
-                context=user_text,
+                roles=classification.teams or None,
+                context=text,
                 session_id=session_id,
             ),
         )
         return
 
     if classification.intent == "history_query":
+        if not HISTORICAL_AGENT_ADDRESS:
+            pending_requests.pop(request_id, None)
+            await _send_reply(ctx, sender, "Historical agent address not configured.")
+            return
         role_filter = classification.teams[0] if classification.teams else None
         await ctx.send(
             HISTORICAL_AGENT_ADDRESS,
             RAGRequest(
                 request_id=request_id,
-                question=user_text,
+                question=text,
                 role_filter=role_filter,
                 top_k=5,
             ),
@@ -409,18 +443,23 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
         return
 
     if classification.intent == "action_request":
-        action_type = classification.action_type or _infer_action_type(user_text)
+        if not PERFORM_ACTION_ADDRESS:
+            pending_requests.pop(request_id, None)
+            await _send_reply(ctx, sender, "Perform action agent address not configured.")
+            return
+        action_type = classification.action_type or _infer_action_type(text)
         if not action_type:
             pending_requests.pop(request_id, None)
-            await _send_chat_reply(
-                ctx,
-                sender,
-                "I could not determine which action to run. Try asking explicitly to send Slack, send email, create Jira, schedule a meeting, or create an action item.",
+            await _send_reply(
+                ctx, sender,
+                "I could not determine which action to run. "
+                "Try asking explicitly to send Slack, send email, create Jira, "
+                "schedule a meeting, or create an action item.",
             )
             return
 
         payload_json = classification.action_payload_json or json.dumps(
-            _infer_action_payload(user_text, action_type)
+            _infer_action_payload(text, action_type)
         )
         await ctx.send(
             PERFORM_ACTION_ADDRESS,
@@ -428,30 +467,34 @@ async def handle_chat(ctx: Context, sender: str, msg: ChatMessage):
                 request_id=request_id,
                 action_type=action_type,
                 payload=payload_json,
-                context=user_text,
+                context=text,
                 priority="normal",
             ),
         )
         return
 
+    # Unknown intent
     pending_requests.pop(request_id, None)
-    await _send_chat_reply(ctx, sender, "I could not classify that request.")
+    await _send_reply(ctx, sender, "I could not classify that request.")
 
 
-@chat_protocol.on_message(ChatAcknowledgement)
-async def handle_chat_ack(_: Context, __: str, ___: ChatAcknowledgement):
-    return
+@chat_proto.on_message(ChatAcknowledgement)
+async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
+    pass
 
+
+# ---------------------------------------------------------------------------
+# Sub-agent response handlers (typed uAgents messages, NOT chat protocol)
+# ---------------------------------------------------------------------------
 
 @orchestrator.on_message(FullBriefResponse)
 async def handle_status_response(ctx: Context, sender: str, msg: FullBriefResponse):
     pending = pending_requests.pop(msg.request_id, None)
     if not pending:
         return
-
     status_sessions[pending["sender"]] = msg.session_id or status_sessions.get(pending["sender"], "")
     text = _format_status_response(msg, pending["intent"])
-    await _send_chat_reply(ctx, pending["sender"], text)
+    await _send_reply(ctx, pending["sender"], text)
 
 
 @orchestrator.on_message(RAGResponse)
@@ -459,8 +502,8 @@ async def handle_history_response(ctx: Context, sender: str, msg: RAGResponse):
     pending = pending_requests.pop(msg.request_id, None)
     if not pending:
         return
-
-    await _send_chat_reply(ctx, pending["sender"], _format_history_response(msg))
+    text = _format_history_response(msg)
+    await _send_reply(ctx, pending["sender"], text)
 
 
 @orchestrator.on_message(ActionResponse)
@@ -468,11 +511,24 @@ async def handle_action_response(ctx: Context, sender: str, msg: ActionResponse)
     pending = pending_requests.pop(msg.request_id, None)
     if not pending:
         return
+    text = _format_action_response(msg)
+    await _send_reply(ctx, pending["sender"], text)
 
-    await _send_chat_reply(ctx, pending["sender"], _format_action_response(msg))
+
+# ---------------------------------------------------------------------------
+# Attach protocol and startup
+# ---------------------------------------------------------------------------
+
+orchestrator.include(chat_proto, publish_manifest=True)
 
 
-orchestrator.include(chat_protocol, publish_manifest=True)
+@orchestrator.on_event("startup")
+async def on_startup(ctx: Context):
+    ctx.logger.info(f"Orchestrator started: {ctx.agent.address}")
+    ctx.logger.info(f"Gemini: {'configured' if GEMINI_API_KEY else 'not configured — using keyword fallback'}")
+    ctx.logger.info(f"Status Agent:     {STATUS_AGENT_ADDRESS or 'NOT SET — add STATUS_AGENT_ADDRESS to .env'}")
+    ctx.logger.info(f"Historical Agent: {HISTORICAL_AGENT_ADDRESS or 'NOT SET — add HISTORICAL_AGENT_ADDRESS to .env'}")
+    ctx.logger.info(f"Perform Action:   {PERFORM_ACTION_ADDRESS or 'NOT SET — add PERFORM_ACTION_ADDRESS to .env'}")
 
 
 if __name__ == "__main__":

@@ -1,9 +1,14 @@
-"""Run the StandIn agent topology with an ASI:One-facing orchestrator."""
+"""Run the StandIn agent topology locally with a Bureau."""
 
 import asyncio
+import os
 
+from dotenv import load_dotenv
 from uagents import Agent, Bureau
 from uagents_core.types import AgentInfo
+
+# Load .env first so user-defined addresses take priority
+load_dotenv()
 
 try:
     asyncio.get_event_loop()
@@ -28,12 +33,22 @@ def _patch_agent_info() -> None:
 
 _patch_agent_info()
 
-from agents.historical_agent.agent import agent as historical_agent
-from agents.orchestrator.agent import orchestrator
-from agents.perform_action.agent import agent as perform_action_agent
+# Import sub-agents first to get their computed local addresses
 from agents.status_agent.agent import agent as status_agent
+from agents.historical_agent.agent import agent as historical_agent
+from agents.perform_action.agent import agent as perform_action_agent
 
-BUREAU_PORT = int(__import__("os").getenv("BUREAU_PORT", "8000"))
+# Wire sub-agent addresses into env vars BEFORE importing orchestrator.
+# os.environ.setdefault only sets if NOT already present (from .env or shell),
+# so Agentverse addresses in .env always take priority over local addresses.
+os.environ.setdefault("STATUS_AGENT_ADDRESS", status_agent.address)
+os.environ.setdefault("HISTORICAL_AGENT_ADDRESS", historical_agent.address)
+os.environ.setdefault("PERFORM_ACTION_ADDRESS", perform_action_agent.address)
+
+# Now import orchestrator — it reads the addresses we just wired
+from agents.orchestrator.agent import orchestrator
+
+BUREAU_PORT = int(os.getenv("BUREAU_PORT", "8000"))
 
 
 def main():
@@ -48,10 +63,10 @@ def main():
 
     print("\n=== StandIn Topology ===")
     print(f"  Bureau Port:      {BUREAU_PORT}")
-    print(f"  Orchestrator:    {orchestrator.address}")
-    print(f"  Status Agent:    {status_agent.address}")
-    print(f"  Historical:      {historical_agent.address}")
-    print(f"  Perform Action:  {perform_action_agent.address}")
+    print(f"  Orchestrator:     {orchestrator.address}")
+    print(f"  Status Agent:     {status_agent.address}")
+    print(f"  Historical:       {historical_agent.address}")
+    print(f"  Perform Action:   {perform_action_agent.address}")
     print("========================\n")
 
     bureau.run()

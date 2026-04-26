@@ -30,6 +30,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 load_dotenv()
 
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
+
 from data.company_data import CALENDAR, JIRA, SLACK, USERS
 from models import (
     Claim,
@@ -46,6 +51,7 @@ from models import (
 # ---------------------------------------------------------------------------
 _SEED = os.getenv("STATUS_AGENT_SEED", "status_agent_standin_seed_v1")
 _PORT = int(os.getenv("STATUS_AGENT_PORT", "8007"))
+_ENDPOINT = os.getenv("STATUS_AGENT_ENDPOINT", f"http://127.0.0.1:{_PORT}/submit")
 _GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
 _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _LOGGER = logging.getLogger("status_agent")
@@ -54,8 +60,9 @@ agent = Agent(
     name="status_agent",
     seed=_SEED,
     port=_PORT,
-    mailbox=True,
-    publish_agent_details=True,
+    endpoint=[_ENDPOINT],
+    mailbox=False,
+    publish_agent_details=False,
 )
 
 _STALE_HOURS = 48  # claims sourced from docs older than this are flagged stale
