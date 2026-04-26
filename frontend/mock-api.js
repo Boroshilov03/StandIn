@@ -100,18 +100,11 @@ window.MOCK_API = (() => {
   let _users     = FALLBACK_USERS.slice();
   let _edges     = FALLBACK_EDGES.slice();
   let _source    = 'demo';
+  let _liveTrace = null; // { scenario: 'status'|'history'|'action', step: 0-3 } | null
 
-  let _feed = [
-    { ts:'2026-04-25T10:42:31Z', agent:'perform_action', tool:'send_slack',         status:'PENDING', stub:true,  meta:'#engineering' },
-    { ts:'2026-04-25T10:41:55Z', agent:'perform_action', tool:'create_jira',        status:'STUB',    stub:true,  meta:'NOVA-145 created' },
-    { ts:'2026-04-25T10:41:20Z', agent:'status_agent',   tool:'_tool_jira_search',  status:'STUB',    stub:true,  meta:'"checkout API blocked"' },
-    { ts:'2026-04-25T10:40:01Z', agent:'watchdog',       tool:'poll',               status:'DONE',    stub:false, meta:'no changes detected' },
-    { ts:'2026-04-25T10:39:18Z', agent:'historical',     tool:'tier1_vector',       status:'DONE',    stub:false, meta:'k=5 cosine_sim=0.81' },
-    { ts:'2026-04-25T10:38:02Z', agent:'status_agent',   tool:'gemini.synthesize',  status:'DONE',    stub:false, meta:'role=Engineering' },
-    { ts:'2026-04-25T10:37:42Z', agent:'status_agent',   tool:'_tool_slack_search', status:'STUB',    stub:true,  meta:'role=Design' },
-    { ts:'2026-04-25T10:36:55Z', agent:'perform_action', tool:'create_action_item', status:'DONE',    stub:false, meta:'AI-031 escalation' },
-    { ts:'2026-04-25T10:35:10Z', agent:'status_agent',   tool:'rule_engine',        status:'DONE',    stub:false, meta:'escalation_required=true' },
-  ];
+  // Feed starts empty — entries appear as real requests fire.
+  // Backend action_log is merged in via _refreshFeed().
+  let _feed = [];
 
   let _healthState = {
     status:     { online: true,  Gemini: true,  MongoDB: true  },
@@ -145,6 +138,18 @@ window.MOCK_API = (() => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(6000),
+    });
+    if (!r.ok) throw new Error(`${r.status}`);
+    return r.json();
+  }
+
+  // Long-timeout POST for operations that run the full agent pipeline (~30s)
+  async function _postLong(url, body) {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(45000),
     });
     if (!r.ok) throw new Error(`${r.status}`);
     return r.json();
@@ -199,6 +204,21 @@ window.MOCK_API = (() => {
     } catch (_) {}
   }
 
+  async function _refreshFeed() {
+    try {
+      const data = await _get(`${BASE.perform}/log`);
+      if (Array.isArray(data.entries) && data.entries.length > 0) {
+        const seenKeys = new Set(_feed.map(e => `${e.ts}|${e.agent}|${e.tool}`));
+        const newEntries = data.entries
+          .map(e => ({ ts: e.ts, agent: e.agent, tool: e.tool, status: e.status, stub: e.stub ?? false, meta: e.meta || '' }))
+          .filter(e => !seenKeys.has(`${e.ts}|${e.agent}|${e.tool}`));
+        if (newEntries.length > 0) {
+          _feed = [..._feed, ...newEntries].sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, 80);
+        }
+      }
+    } catch (_) { /* keep local feed */ }
+  }
+
   async function _refreshHealth() {
     const checks = [
       { id: 'status',     url: `${BASE.status}/health`  },
@@ -208,11 +228,14 @@ window.MOCK_API = (() => {
     for (const { id, url } of checks) {
       try {
         const h = await _get(url);
-        _healthState[id] = {
-          online:  h.status === 'ok',
-          Gemini:  h.gemini  !== 'not configured',
-          MongoDB: h.mongodb !== 'not configured',
-        };
+        // Each agent has slightly different health fields — map explicitly
+        const geminiOk  = id === 'perform'
+          ? true  // perform_action doesn't use Gemini directly
+          : h.gemini === 'configured';
+        const mongoOk   = id === 'historical'
+          ? h.tier1 === 'ready'        // historical uses tier1 (Atlas vector)
+          : (h.mongodb === 'configured' || h.mongodb === 'connected');
+        _healthState[id] = { online: h.status === 'ok', Gemini: geminiOk, MongoDB: mongoOk };
       } catch (_) {
         _healthState[id] = { ..._healthState[id], online: false };
       }
@@ -220,10 +243,11 @@ window.MOCK_API = (() => {
   }
 
   // Initial fetch + polling
-  Promise.all([_refreshApprovals(), _refreshGraph(), _refreshHealth()]);
+  Promise.all([_refreshApprovals(), _refreshGraph(), _refreshHealth(), _refreshFeed()]);
   setInterval(_refreshApprovals, 5000);
   setInterval(_refreshGraph,     30000);
   setInterval(_refreshHealth,    8000);
+  setInterval(_refreshFeed,      10000);
 
   // ── Local feed helper ───────────────────────────────────────────────────
 
@@ -255,17 +279,87 @@ window.MOCK_API = (() => {
     approve: async (id) => {
       _approvals = _approvals.filter(a => a.action_id !== id);
       _pushFeed('perform_action', 'approve', 'DONE', false, id.slice(0, 12));
+      _liveTrace = { scenario: 'action', step: 1 };
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 2 }; }, 350);
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 3 }; }, 700);
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = null; }, 1300);
       try { await _post(`${BASE.perform}/approvals/approve`, { action_id: id, approver: 'dashboard' }); } catch (_) {}
     },
 
     reject: async (id) => {
       _approvals = _approvals.filter(a => a.action_id !== id);
       _pushFeed('perform_action', 'reject', 'DONE', false, id.slice(0, 12));
+      _liveTrace = { scenario: 'action', step: 1 };
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 2 }; }, 350);
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 3 }; }, 700);
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = null; }, 1300);
       try { await _post(`${BASE.perform}/approvals/reject`, { action_id: id, reason: 'rejected via dashboard' }); } catch (_) {}
     },
 
     edgesFor: (userId) => _edges
       .filter(e => e.from_user === userId || e.to_user === userId)
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
+
+    getLiveTrace: () => _liveTrace,
+
+    // ── Brief & RAG HTTP endpoints ────────────────────────────────────────
+
+    fetchBrief: async (topic, userEmail = 'demo@standin.ai') => {
+      _liveTrace = { scenario: 'status', step: 0 };
+      const t1 = setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = { scenario: 'status', step: 1 }; }, 900);
+      const t2 = setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = { scenario: 'status', step: 2 }; }, 2400);
+      try {
+        const result = await _postLong(`${BASE.status}/brief`, { topic, user_email: userEmail });
+        clearTimeout(t1); clearTimeout(t2);
+        _liveTrace = { scenario: 'status', step: 3 };
+        _pushFeed('orchestrator', 'classify → status', 'DONE', false, (topic || '').slice(0, 28));
+        if (result && result.mode !== 'error') {
+          const live = result.mode === 'live';
+          _pushFeed('status_agent', 'gather',     'DONE', !live, `${result.role_statuses?.length || 0} roles`);
+          _pushFeed('status_agent', 'synthesise', 'DONE', !live, `mode=${result.mode}`);
+          _pushFeed('status_agent', 'rule_engine','DONE', false,  result.escalation_required ? 'escalation=true' : 'clean');
+          if ((result.evidence_passports?.length || 0) > 0) {
+            _pushFeed('status_agent', 'passports', 'DONE', false, `n=${result.evidence_passports.length}`);
+          }
+          _source = result.mode || 'live';
+        }
+        setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = null; }, 1600);
+        return result;
+      } catch (e) {
+        clearTimeout(t1); clearTimeout(t2);
+        _liveTrace = null;
+        console.warn('fetchBrief failed:', e);
+        return null;
+      }
+    },
+
+    askHistory: async (question) => {
+      _liveTrace = { scenario: 'history', step: 0 };
+      const t1 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 1 }; }, 700);
+      const t2 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 2 }; }, 1600);
+      try {
+        const result = await _postLong(`${BASE.history}/ask`, { question });
+        clearTimeout(t1); clearTimeout(t2);
+        _liveTrace = { scenario: 'history', step: 3 };
+        _pushFeed('orchestrator', 'classify → history', 'DONE', false, (question || '').slice(0, 28));
+        if (result) {
+          const method = result.retrieval_method || 'unknown';
+          const tier1  = method === 'vector_search';
+          const tier2  = method === 'keyword_search';
+          _pushFeed('historical', 'tier1_vector',  tier1 ? 'DONE' : 'MISS', !tier1, tier1 ? `sim=${result.confidence?.toFixed(2)}` : 'no match');
+          if (!tier1) {
+            _pushFeed('historical', 'tier2_keyword', tier2 ? 'DONE' : 'MISS', false, tier2 ? 'bm25 hit' : 'no match');
+          }
+          _pushFeed('historical', 'synthesise', 'DONE', false, `conf=${result.confidence?.toFixed(2) || '?'}`);
+        }
+        setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = null; }, 1400);
+        return result;
+      } catch (e) {
+        clearTimeout(t1); clearTimeout(t2);
+        _liveTrace = null;
+        console.warn('askHistory failed:', e);
+        return null;
+      }
+    },
   };
 })();

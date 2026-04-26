@@ -301,3 +301,21 @@ class GraphResponse(Model):
     edges: List[GraphEdge]
     generated_at: str
     source: str         # "mongodb" | "hardcoded"
+
+
+# ---------------------------------------------------------------------------
+# Action log feed  (served via GET /log on perform_action)
+# ---------------------------------------------------------------------------
+
+class FeedEntry(Model):
+    ts: str
+    agent: str
+    tool: str
+    status: str          # "DONE" | "FAIL" | "STUB" | "PENDING"
+    stub: bool = False
+    meta: Optional[str] = None
+
+
+class FeedResponse(Model):
+    entries: List[FeedEntry]
+    source: str          # "mongodb" | "fallback"
