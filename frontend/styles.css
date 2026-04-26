@@ -2400,6 +2400,110 @@ button:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
   .resolve-panel { width: 100%; }
 }
 
+/* ── Auth0 AI chip ────────────────────────────────────────────────────── */
+
+.auth0-chip-wrap {
+  position: relative;
+  display: inline-flex;
+  margin-right: 10px;
+}
+.auth0-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 10px; border-radius: 999px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.10);
+  font-size: 11px; font-weight: 600; letter-spacing: 0.04em;
+  color: rgba(255,255,255,0.86); cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.auth0-chip:hover { background: rgba(255,255,255,0.07); }
+.auth0-chip .auth0-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #6b7280; box-shadow: 0 0 0 0 rgba(0,0,0,0);
+}
+.auth0-chip.live  { border-color: rgba(255, 122, 89, 0.45); color: #ffb39c; }
+.auth0-chip.live .auth0-dot { background: #ff7a59; box-shadow: 0 0 8px rgba(255,122,89,0.6); }
+.auth0-chip.off   { opacity: 0.65; }
+.auth0-label { letter-spacing: 0.06em; }
+.auth0-feats { display: inline-flex; gap: 4px; margin-left: 2px; }
+.auth0-feat {
+  font-size: 9.5px; font-weight: 700; padding: 1px 5px;
+  border-radius: 4px; letter-spacing: 0.06em;
+}
+.auth0-feat.on  { background: rgba(255,122,89,0.18); color: #ffb39c; }
+.auth0-feat.off { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.45); }
+
+.auth0-detail {
+  position: fixed; top: 52px; right: 16px;
+  width: 360px; z-index: 1100;
+  background: #1c1d22; border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 12px; padding: 14px 14px 10px;
+  box-shadow: 0 20px 50px rgba(0,0,0,0.55);
+  animation: notifPop 140ms ease-out;
+}
+.auth0-detail-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 10px;
+}
+.auth0-detail-head strong { color: #fff; font-size: 13px; }
+.auth0-state {
+  font-size: 10px; padding: 2px 7px; border-radius: 4px;
+  letter-spacing: 0.05em; font-weight: 700;
+}
+.auth0-state.live { background: rgba(255,122,89,0.22); color: #ffb39c; }
+.auth0-state.off  { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.55); }
+
+.auth0-feat-list { list-style: none; margin: 0; padding: 0; }
+.auth0-feat-list li {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-row-gap: 4px;
+  padding: 8px 0; border-top: 1px solid rgba(255,255,255,0.06);
+}
+.auth0-feat-list li:first-child { border-top: 0; }
+.auth0-feat-name { font-size: 12px; font-weight: 600; color: #f4f4f6; }
+.auth0-feat-state {
+  font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em;
+  padding: 1px 6px; border-radius: 4px;
+}
+.auth0-feat-list li.on  .auth0-feat-state { background: rgba(255,122,89,0.22); color: #ffb39c; }
+.auth0-feat-list li.off .auth0-feat-state { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.45); }
+.auth0-feat-desc {
+  grid-column: 1 / span 2;
+  font-size: 11px; line-height: 1.4; color: rgba(255,255,255,0.62);
+}
+.auth0-hint {
+  margin-top: 10px; padding: 8px 10px;
+  background: rgba(255,255,255,0.04); border-radius: 6px;
+  font-size: 11px; color: rgba(255,255,255,0.66); line-height: 1.5;
+}
+.auth0-hint code {
+  background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px;
+  font-size: 10.5px; color: #f0d3c5;
+}
+.auth0-user-badge {
+  font-size: 10px; color: #ffb39c; font-weight: 700;
+  background: rgba(255,122,89,0.15); padding: 1px 6px; border-radius: 4px;
+}
+.auth0-identity {
+  padding: 8px 0 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  margin-bottom: 6px;
+}
+.auth0-identity-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.auth0-identity-email { font-size: 12px; color: #ffb39c; display: flex; align-items: center; gap: 6px; }
+.auth0-identity-dot { width: 7px; height: 7px; border-radius: 50%; background: #ff7a59; display: inline-block; }
+.auth0-identity-anon { font-size: 12px; color: rgba(255,255,255,0.55); }
+.auth0-btn-sm {
+  font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid; letter-spacing: 0.04em; transition: opacity 120ms;
+}
+.auth0-btn-login { background: #ff7a59; border-color: #ff7a59; color: #fff; }
+.auth0-btn-login:hover { opacity: 0.85; }
+.auth0-btn-login.disabled { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.12); color: rgba(255,255,255,0.45); cursor: default; }
+.auth0-btn-logout { background: transparent; border-color: rgba(255,255,255,0.15); color: rgba(255,255,255,0.65); }
+.auth0-btn-logout:hover { border-color: rgba(255,255,255,0.3); color: #fff; }
+
 /* ── Notifications: bell, dropdown, toast ─────────────────────────────── */
 
 .notif-bell-wrap {

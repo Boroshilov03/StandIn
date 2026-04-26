@@ -197,6 +197,12 @@ def _build_demo_personas() -> dict[str, dict]:
 DEMO_PERSONAS: dict[str, dict] = _build_demo_personas()
 DEMO_PERSONA_ID = os.getenv("ORCHESTRATOR_DEMO_USER_ID", "user_alice").strip()
 DEMO_PERSONA = DEMO_PERSONAS.get(DEMO_PERSONA_ID) or next(iter(DEMO_PERSONAS.values()))
+# Override the persona's email with AUTH0_DEMO_EMAIL so CIBA pushes land on the
+# device enrolled for that Auth0 user. Without this, owner=alice@standin.ai which
+# has no Auth0 user → CIBA silently no-ops and falls back to "no approval".
+_AUTH0_DEMO_EMAIL = os.getenv("AUTH0_DEMO_EMAIL", "").strip()
+if _AUTH0_DEMO_EMAIL:
+    DEMO_PERSONA = {**DEMO_PERSONA, "email": _AUTH0_DEMO_EMAIL}
 
 TEAM_ALIASES = {
     "engineering": "Engineering",
@@ -844,7 +850,7 @@ async def _dispatch_followup_create_jira(
             title=payload["summary"],
             summary=description,
             team=ctx_data.get("team") or "Engineering",
-            owner=persona["id"],
+            owner=persona.get("email") or persona["id"],
             owner_name=persona["name"],
             risk="high",
         ),
@@ -1062,7 +1068,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
                     title=base_payload.get("title") or base_payload.get("summary") or "",
                     summary=base_payload.get("description") or user_text,
                     team=(schedule_meta or {}).get("team") or "",
-                    owner=DEMO_PERSONA["id"],
+                    owner=DEMO_PERSONA.get("email") or DEMO_PERSONA["id"],
                     owner_name=DEMO_PERSONA["name"],
                 ),
             )

@@ -7,6 +7,7 @@ import re
 import sys
 import uuid
 from datetime import datetime, timedelta, UTC
+from typing import Optional
 
 from dotenv import load_dotenv
 from uagents import Agent, Context, Model
@@ -43,6 +44,22 @@ _GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _SLACK_BOT_TOKEN  = os.getenv("SLACK_BOT_TOKEN",  "")
 _SLACK_USER_TOKEN = os.getenv("SLACK_USER_TOKEN",  "")
 _LOGGER = logging.getLogger("status_agent")
+
+try:
+    import auth0_ai
+except Exception:  # pragma: no cover — Auth0 module is optional
+    auth0_ai = None  # type: ignore[assignment]
+
+# Per-request override populated by handle_full_brief before _gather_role_data fires.
+# Used by _slack_*_search to pull a per-user Slack token from Auth0 Token Vault
+# instead of the shared bot token. Reset to None at the end of each request.
+_request_slack_token: Optional[str] = None
+_request_token_source: str = "env"  # "env" | "token_vault"
+
+
+def _slack_bot_token_for_request() -> str:
+    """Returns the active Slack token: per-user (Token Vault) if set, else env."""
+    return _request_slack_token or _SLACK_BOT_TOKEN
 
 
 def _ensure_event_loop() -> None:
@@ -366,7 +383,7 @@ def _slack_list_channels() -> dict[str, str]:
         )
         req = _ureq.Request(
             f"https://slack.com/api/conversations.list?{params}",
-            headers={"Authorization": f"Bearer {_SLACK_BOT_TOKEN}"},
+            headers={"Authorization": f"Bearer {_slack_bot_token_for_request()}"},
         )
         with _ureq.urlopen(req, timeout=8) as r:
             data = json.loads(r.read().decode())
@@ -441,7 +458,7 @@ def _slack_history_search(queries: list[str], limit: int) -> list[dict]:
             params = urllib.parse.urlencode({"channel": ch_id, "limit": "100"})
             req = _ureq.Request(
                 f"https://slack.com/api/conversations.history?{params}",
-                headers={"Authorization": f"Bearer {_SLACK_BOT_TOKEN}"},
+                headers={"Authorization": f"Bearer {_slack_bot_token_for_request()}"},
             )
             with _ureq.urlopen(req, timeout=6) as r:
                 ch_data = json.loads(r.read().decode())
@@ -1570,6 +1587,23 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
         f"topic='{msg.topic}' | user={msg.user_email}"
     )
 
+    # ── Auth0 Token Vault — pull per-user Slack token if available ───────
+    global _request_slack_token, _request_token_source
+    _request_slack_token = None
+    _request_token_source = "env"
+    if auth0_ai is not None and auth0_ai.is_configured() and msg.user_email:
+        try:
+            tok = auth0_ai.get_federated_token(msg.user_email, "slack-oauth")
+            if tok:
+                _request_slack_token = tok
+                _request_token_source = "token_vault"
+                ctx.logger.info(
+                    f"Auth0 Token Vault hit | user={msg.user_email} | "
+                    f"slack token applied for this request"
+                )
+        except Exception as exc:
+            ctx.logger.warning(f"Token Vault lookup failed: {exc}")
+
     # ── Load prior brief for delta detection (non-blocking) ──────────────
     last_brief = _load_last_brief(msg.user_email)
     previous_roles: dict = {}
@@ -1778,8 +1812,12 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
         f"(p1={t1_ms}ms gather, p2={t2_ms}ms synthesis, p3={t3_ms}ms contradict) | "
         f"roles={statuses} | contradictions={len(brief.contradictions)} | "
         f"passports={len(passports)} | escalation={brief.escalation_required} | "
-        f"deltas={len(deltas)} | mode={mode}"
+        f"deltas={len(deltas)} | mode={mode} | slack_token={_request_token_source}"
     )
+
+    # Reset Token Vault override so the next request starts clean
+    _request_slack_token = None
+    _request_token_source = "env"
     return brief
 
 

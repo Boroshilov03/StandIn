@@ -13,10 +13,14 @@ Routes proxied:
     /api/status/*   →  http://localhost:8007/*   (Status Agent)
     /api/history/*  →  http://localhost:8009/*   (Historical Agent)
 """
+import json
 import mimetypes
 import os
 import sys
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 try:
     from aiohttp import web, ClientSession, ClientConnectorError, ClientTimeout
@@ -115,8 +119,21 @@ async def handle_static(request: web.Request) -> web.Response:
     return web.FileResponse(path, headers=headers)
 
 
+async def handle_auth0_config(request: web.Request) -> web.Response:
+    """Expose Auth0 public config to the SPA — no secrets, only public values."""
+    cfg = {
+        "domain":    os.getenv("AUTH0_DOMAIN", ""),
+        "client_id": os.getenv("AUTH0_SPA_CLIENT_ID", ""),
+        "audience":  os.getenv("AUTH0_AUDIENCE", ""),
+    }
+    return web.Response(
+        text=json.dumps(cfg), content_type="application/json", headers=CORS,
+    )
+
+
 def build_app() -> web.Application:
     app = web.Application()
+    app.router.add_route("GET",  "/auth0-config", handle_auth0_config)
     app.router.add_route("*", "/api/{tail:.*}", handle_api)
     app.router.add_route("GET",  "/{tail:.*}", handle_static)
     return app
