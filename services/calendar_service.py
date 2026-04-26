@@ -1,9 +1,12 @@
+import logging
 import os
 from datetime import UTC, datetime
 
 from pymongo import MongoClient
 
 from services.google_auth import get_calendar_service
+
+_LOGGER = logging.getLogger("calendar_service")
 
 
 def _get_db():
@@ -41,20 +44,38 @@ def create_event(event_details: dict) -> dict:
     }
     """
     timezone = event_details.get("timezone", "UTC")
+    attendees_raw = event_details.get("attendees", []) or []
     body = {
         "summary": event_details["summary"],
         "description": event_details.get("description", ""),
         "start": {"dateTime": event_details["start"], "timeZone": timezone},
         "end": {"dateTime": event_details["end"], "timeZone": timezone},
-        "attendees": [{"email": email} for email in event_details.get("attendees", [])],
+        "attendees": [{"email": email} for email in attendees_raw],
     }
 
     reminders = event_details.get("reminders")
     if reminders:
         body["reminders"] = {"useDefault": False, "overrides": reminders}
 
+    _LOGGER.info(
+        "Calendar create_event request | "
+        f"summary='{event_details['summary']}' | "
+        f"start={event_details['start']} | end={event_details['end']} | "
+        f"timezone={timezone} | attendees={attendees_raw} | "
+        f"reminders={reminders or []}"
+    )
+
     service = get_calendar_service()
     created = service.events().insert(calendarId="primary", body=body).execute()
+
+    organizer_email = (created.get("organizer") or {}).get("email", "")
+    _LOGGER.info(
+        "Calendar create_event success | "
+        f"eventId={created.get('id', '')} | htmlLink={created.get('htmlLink', '')} | "
+        f"organizer={organizer_email} | status={created.get('status', '')} | "
+        f"summary='{created.get('summary', '')}'"
+    )
+
     _update_meeting_event_id(event_details["summary"], created.get("id", ""))
     return created
 
