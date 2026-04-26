@@ -25,6 +25,7 @@ from models import (
     VerifyRequest,
     VerifyResponse,
 )
+import gx10_client
 try:
     from services.calendar_service import list_events as list_calendar_events
 except Exception:
@@ -811,18 +812,77 @@ Raw data:
 """
 
 
-async def _synthesize_role(role: str, raw: dict) -> dict | None:
+def _redact_raw_via_gx10(role: str, raw: dict, workflow_id: str) -> tuple[dict, dict]:
+    """
+    Send slack/jira/seed_doc content through the GX10 trust layer before it
+    leaves for cloud Gemini. Returns (redacted_raw, trust_meta) where trust_meta
+    is the GX10 response envelope (for logging / dashboard surfacing).
+    """
+    docs: list[dict[str, str]] = []
+    for m in raw.get("slack_messages", []):
+        docs.append({
+            "id": m.get("source_id", ""),
+            "owner": role,
+            "type": "slack",
+            "content": m.get("content", ""),
+        })
+    for t in raw.get("jira_tickets", []):
+        docs.append({
+            "id": t.get("source_id", ""),
+            "owner": role,
+            "type": "jira",
+            "content": t.get("content", ""),
+        })
+    for d in raw.get("seed_docs", []):
+        docs.append({
+            "id": d.get("source_id", ""),
+            "owner": role,
+            "type": "seed_doc",
+            "content": d.get("content", ""),
+        })
+
+    trust = gx10_client.redact_documents(workflow_id, docs)
+    by_id = {d["id"]: d["content"] for d in trust.get("redactedDocuments", [])}
+
+    redacted = dict(raw)
+    redacted["slack_messages"] = [
+        {**m, "content": by_id.get(m.get("source_id", ""), m.get("content", ""))}
+        for m in raw.get("slack_messages", [])
+    ]
+    redacted["jira_tickets"] = [
+        {**t, "content": by_id.get(t.get("source_id", ""), t.get("content", ""))}
+        for t in raw.get("jira_tickets", [])
+    ]
+    redacted["seed_docs"] = [
+        {**d, "content": by_id.get(d.get("source_id", ""), d.get("content", ""))}
+        for d in raw.get("seed_docs", [])
+    ]
+    return redacted, trust
+
+
+async def _synthesize_role(role: str, raw: dict, workflow_id: str = "unknown") -> dict | None:
     if not _GEMINI_KEY:
         return None
     try:
         from google.genai import types as gt
 
+        # GX10 edge trust layer — strip PII / secrets / confidential language
+        # from raw workplace data BEFORE it crosses the network to Gemini.
+        redacted_raw, trust_meta = _redact_raw_via_gx10(role, raw, workflow_id)
+        _LOGGER.info(
+            "GX10 redaction for %s | status=%s | redacted=%d fields | sentToCloud=%d docs",
+            role,
+            trust_meta.get("trustLayerStatus"),
+            trust_meta.get("sensitiveFieldsRedacted", 0),
+            trust_meta.get("rawDocumentsSentToCloud", 0),
+        )
+
         client = _get_gemini_client()
         prompt = _SYNTHESIS_TMPL.format(
             role=role,
-            lens=raw["lens"],
+            lens=redacted_raw["lens"],
             raw_data=json.dumps(
-                {k: v for k, v in raw.items() if k != "lens"},
+                {k: v for k, v in redacted_raw.items() if k != "lens"},
                 default=str,
             ),
         )
@@ -922,14 +982,53 @@ Return ONLY valid JSON — no markdown:
 """
 
 
-async def _detect_contradictions(responses: list[MeetingResponse]) -> dict:
+async def _detect_contradictions(responses: list[MeetingResponse], workflow_id: str = "unknown") -> dict:
     # Always run the rule engine first — it's the safety net
     rules = _contradictions_rules(responses)
 
+    # GX10 edge contradiction pre-check — runs locally on the ASUS GX10 before
+    # any cloud call. Findings are merged into the verdict; never override rules.
+    gx10_claims = [
+        {
+            "owner": r.role,
+            "role": r.role,
+            "claim": c.claim,
+            "confidence": (
+                "high" if c.confidence >= 0.85 else
+                "medium" if c.confidence >= 0.60 else
+                "low"
+            ),
+            "sourceIds": c.source_ids,
+        }
+        for r in responses
+        for c in r.claims
+    ]
+    gx10_verdict = gx10_client.check_contradictions(workflow_id, gx10_claims)
+    gx10_contradictions: list[str] = []
+    gx10_escalation = False
+    if gx10_verdict:
+        for cd in gx10_verdict.get("contradictions", []):
+            between = " ↔ ".join(cd.get("between", [])) or "?"
+            gx10_contradictions.append(f"[GX10] {between}: {cd.get('reason', '')}")
+        gx10_escalation = bool(gx10_verdict.get("escalationRequired", False))
+        _LOGGER.info(
+            "GX10 contradiction-check | found=%d | escalation=%s",
+            len(gx10_contradictions), gx10_escalation,
+        )
+
     client = _get_gemini_client()
     if client is None or rules["contradictions"]:
-        # Rules already found contradictions — authoritative, skip the ~20s Gemini call
-        return {**rules, "stale_claims": [], "missing_owners": [], "unsupported_claims": rules.get("unsupported_claims", [])}
+        # Rules already found contradictions — authoritative, skip the ~20s Gemini call.
+        # Still merge GX10 findings on top so edge-detected contradictions surface.
+        merged = list(dict.fromkeys(rules["contradictions"] + gx10_contradictions))
+        return {
+            **rules,
+            "contradictions": merged,
+            "escalation_required": rules["escalation_required"] or gx10_escalation,
+            "stale_claims": [],
+            "missing_owners": [],
+            "unsupported_claims": rules.get("unsupported_claims", []),
+        }
 
     try:
         from google.genai import types as gt
@@ -963,24 +1062,34 @@ async def _detect_contradictions(responses: list[MeetingResponse]) -> dict:
         )
         gemini = json.loads(resp.text)
 
-        # Merge: union rule findings + Gemini findings so neither source can drop detections.
-        # Rules are authoritative on escalation_required — Gemini can only add, never remove.
+        # Merge: union rule findings + GX10 findings + Gemini findings so no
+        # source can drop detections. Rules + GX10 are authoritative on
+        # escalation_required — Gemini can only add, never remove.
         gemini_contradictions  = gemini.get("contradictions") or []
         gemini_unsupported     = gemini.get("unsupported_claims") or []
-        merged_contradictions  = list(dict.fromkeys(rules["contradictions"] + gemini_contradictions))
+        merged_contradictions  = list(dict.fromkeys(
+            rules["contradictions"] + gx10_contradictions + gemini_contradictions
+        ))
         merged_unsupported     = list(dict.fromkeys(rules["unsupported_claims"] + gemini_unsupported))
         return {
             "contradictions":      merged_contradictions,
             "stale_claims":        gemini.get("stale_claims") or [],
             "unsupported_claims":  merged_unsupported,
             "missing_owners":      gemini.get("missing_owners") or [],
-            "escalation_required": rules["escalation_required"] or bool(gemini.get("escalation_required")),
+            "escalation_required": rules["escalation_required"] or gx10_escalation or bool(gemini.get("escalation_required")),
             "escalation_reason":   gemini.get("escalation_reason") or rules["escalation_reason"],
             "recommended_action":  gemini.get("recommended_action") or rules["recommended_action"],
         }
     except Exception as exc:
         _LOGGER.warning(f"Gemini contradiction detection failed: {exc}")
-        return {**rules, "stale_claims": [], "missing_owners": []}
+        merged = list(dict.fromkeys(rules["contradictions"] + gx10_contradictions))
+        return {
+            **rules,
+            "contradictions": merged,
+            "escalation_required": rules["escalation_required"] or gx10_escalation,
+            "stale_claims": [],
+            "missing_owners": [],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1149,8 +1258,10 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
     # All synthesis calls fire simultaneously; one slow Gemini response
     # does not delay the others.
     t2 = time.monotonic()
+    # Each role's raw data is redacted via the GX10 edge trust layer inside
+    # _synthesize_role before it ever reaches Gemini.
     synth_results = await asyncio.gather(
-        *[_synthesize_role(role, raw_data[role]) for role in roles],
+        *[_synthesize_role(role, raw_data[role], workflow_id=msg.request_id) for role in roles],
         return_exceptions=True,
     )
     t2_ms = int((time.monotonic() - t2) * 1000)
@@ -1197,7 +1308,7 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
 
     # ── Phase 3: contradiction detection ─────────────────────────────────
     t3 = time.monotonic()
-    verdict = await _detect_contradictions(role_responses)
+    verdict = await _detect_contradictions(role_responses, workflow_id=msg.request_id)
     stale   = _check_stale(role_responses)
     t3_ms   = int((time.monotonic() - t3) * 1000)
     ctx.logger.info(
@@ -1286,7 +1397,7 @@ async def handle_verify(ctx: Context, sender: str, msg: VerifyRequest):
         f"roles={[r.role for r in msg.responses]}"
     )
     try:
-        verdict = await _detect_contradictions(msg.responses)
+        verdict = await _detect_contradictions(msg.responses, workflow_id=msg.request_id)
         stale   = _check_stale(msg.responses)
 
         passports = _build_passports(

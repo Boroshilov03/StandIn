@@ -97,6 +97,55 @@ ACTION_HINTS = {
     "post_brief": ("post brief", "save brief", "publish brief"),
 }
 
+pending_requests: dict[str, dict] = {}
+status_sessions: dict[str, str] = {}
+
+_CLASSIFIER_PROMPT = """
+You classify user requests for a coordination orchestrator.
+
+Return strict JSON with this schema:
+{
+  "intent": "status_query|conflict_check|action_request|history_query|briefing_request",
+  "teams": ["Engineering" | "Design" | "GTM" | "Product"],
+  "topic": "short topic or null",
+  "time_window": "short time window phrase or null",
+  "action_type": "send_email|send_slack|draft_slack|create_jira|update_jira_status|schedule_meeting|create_action_item|post_brief|null",
+  "action_payload_json": "JSON string for action payload or null",
+  "confidence": 0.0
+}
+
+Rules:
+- status_query   = current state / readiness / blockers for a team or project
+- conflict_check = contradictions, disagreements, inconsistencies between teams
+- briefing_request = broad cross-team summary / executive brief
+- history_query  = past decisions, previous meetings, what happened before,
+                   OR any lookup about a specific person, ticket, or entity
+                   (e.g. "anything about Derek", "what is Alice working on", "tell me about NOVA-142")
+- action_request = asks to send/create/update/schedule/post something
+- Calendar read requests are NOT action_request:
+  - upcoming/current meetings -> status_query
+  - past meetings/events/history -> history_query
+- Calendar create/update requests ARE action_request (typically schedule_meeting).
+- Extract teams only from explicit team mentions.
+- Keep topic short and literal.
+- time_window should only be set when clearly present.
+- action_payload_json must be a compact JSON object string when action_request.
+- For create_jira payload, include:
+  {summary, description, issuetype, priority, labels, status, sprint_name}
+  and prefer defaults: issuetype=Task, priority=Medium, labels=["standin","auto-created"], status="To Do", sprint_name="Sprint 1".
+- For schedule_meeting payload, prefer defaults:
+  duration_minutes=30, time_zone="UTC", attendees=[].
+- For send_slack payload, include channel and default to "#standin-updates" when unspecified.
+""".strip()
+
+
+def _extract_text(msg: ChatMessage) -> str:
+    chunks: list[str] = []
+    for item in msg.content:
+        if isinstance(item, TextContent):
+            chunks.append(item.text)
+    return " ".join(chunks).strip()
+
 
 def _detect_teams(text: str) -> list[str]:
     lowered = text.lower()
@@ -135,16 +184,33 @@ def _infer_action_type(text: str) -> str | None:
 def _infer_action_payload(text: str, action_type: str | None) -> dict:
     payload: dict[str, object] = {"original_request": text}
     if action_type in {"send_slack", "draft_slack"}:
+        channel_match = re.search(r"(#\w[\w-]*)", text)
+        payload["channel"] = channel_match.group(1) if channel_match else "#standin-updates"
         payload["text"] = text
     elif action_type == "send_email":
         payload.update({"to": [], "subject": "StandIn request", "body": text})
     elif action_type == "create_jira":
         payload.update({"project": "NOVA", "summary": text[:120], "description": text})
+        payload["summary"] = text[:120]
+        payload["description"] = text
+        payload["issuetype"] = "Task"
+        payload["priority"] = "Medium"
+        payload["labels"] = ["standin", "auto-created"]
+        payload["status"] = "To Do"
+        payload["sprint_name"] = "Sprint 1"
     elif action_type == "update_jira_status":
         ticket = re.search(r"\b([A-Z]{2,10}-\d+)\b", text)
         payload.update({"ticket_id": ticket.group(1) if ticket else "", "new_status": "In Progress", "comment": text})
     elif action_type == "schedule_meeting":
         payload.update({"title": "StandIn follow-up", "attendees": [], "description": text})
+        payload["duration_minutes"] = 30
+        payload["time_zone"] = "UTC"
+    elif action_type == "read_calendar_events":
+        payload["max_results"] = 10
+        payload["query"] = ""
+        payload["time_min"] = ""
+        payload["time_max"] = ""
+        payload["description"] = text
     elif action_type == "create_action_item":
         payload.update({"description": text, "owner": "unassigned", "urgency": "medium"})
     elif action_type == "post_brief":
