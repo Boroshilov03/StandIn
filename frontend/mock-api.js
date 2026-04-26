@@ -106,6 +106,13 @@ window.MOCK_API = (() => {
   // Backend action_log is merged in via _refreshFeed().
   let _feed = [];
 
+  // ── Notifications (live, cursor-polled) ────────────────────────────────
+  let _notifications  = [];   // newest first
+  let _notifCursor    = null; // ISO ts of most recent seen notification
+  let _notifUnread    = 0;
+  let _notifListeners = [];   // (notifs, unread, justArrived) => void
+  let _firstNotifPoll = true;
+
   let _healthState = {
     status:     { online: true,  Gemini: true,  MongoDB: true  },
     perform:    { online: true,  Gemini: true,  MongoDB: true  },
@@ -186,9 +193,17 @@ window.MOCK_API = (() => {
   async function _refreshApprovals() {
     try {
       const data = await _get(`${BASE.perform}/approvals`);
-      if (Array.isArray(data.actions) && data.actions.length > 0) {
-        _approvals = data.actions.map(_beToCard);
-        _source = 'mongodb';
+      if (Array.isArray(data.actions)) {
+        const live = data.actions.map(_beToCard);
+        const liveIds = new Set(live.map(c => c.action_id));
+        // Merge: live (real backend) cards first, then any optimistic cards not
+        // yet in backend, then any seeded fallback cards. Keeps the demo full.
+        const optimistic = _approvals.filter(a =>
+          a.action_id.startsWith('pending-') && !liveIds.has(a.action_id)
+        );
+        const fallbacks = FALLBACK_APPROVALS.filter(a => !liveIds.has(a.action_id));
+        _approvals = [...live, ...optimistic, ...fallbacks];
+        if (live.length > 0) _source = 'mongodb';
       }
     } catch (_) { /* keep fallback */ }
   }
@@ -204,6 +219,48 @@ window.MOCK_API = (() => {
     } catch (_) {}
   }
 
+  // Map a (agent, tool) pair from backend feed → tool-node id used by agent-flow graph
+  function _toolKey(agent, tool) {
+    const a = (agent || '').toLowerCase();
+    const t = (tool || '').toLowerCase();
+    if (a.startsWith('status')) {
+      if (t.includes('gather'))      return 'status.gather';
+      if (t.includes('rag'))         return 'status.rag';
+      if (t.includes('synth'))       return 'status.synth';
+      if (t.includes('contradict') || t.includes('rule')) return 'status.contradict';
+      if (t.includes('passport'))    return 'status.passports';
+    }
+    if (a.startsWith('hist')) {
+      if (t.includes('vector') || t.includes('tier1')) return 'hist.vector';
+      if (t.includes('keyword')|| t.includes('tier2')) return 'hist.keyword';
+      if (t.includes('synth'))                          return 'hist.synth';
+      if (t.includes('mongo'))                          return 'hist.mongo';
+    }
+    if (a.startsWith('perform')) {
+      if (t.includes('approv'))    return 'perf.approval';
+      if (t.includes('slack'))     return 'perf.slack';
+      if (t.includes('jira'))      return 'perf.jira';
+      if (t.includes('calendar') || t.includes('meeting')) return 'perf.calendar';
+      if (t.includes('email') || t.includes('gmail'))      return 'perf.gmail';
+    }
+    return null;
+  }
+
+  // Briefly flash a tool node when a fresh backend feed entry arrives
+  function _flashTool(toolId, scenario) {
+    if (!toolId) return;
+    const sc = scenario || (toolId.startsWith('hist.') ? 'history'
+                          : toolId.startsWith('perf.') ? 'action'
+                          : 'status');
+    const prev = _liveTrace || { scenario: sc, step: 0, tools: [] };
+    const tools = Array.from(new Set([...(prev.tools || []), toolId]));
+    _liveTrace = { ...prev, scenario: sc, tools };
+    setTimeout(() => {
+      if (!_liveTrace) return;
+      _liveTrace = { ..._liveTrace, tools: (_liveTrace.tools || []).filter(x => x !== toolId) };
+    }, 1400);
+  }
+
   async function _refreshFeed() {
     try {
       const data = await _get(`${BASE.perform}/log`);
@@ -214,6 +271,8 @@ window.MOCK_API = (() => {
           .filter(e => !seenKeys.has(`${e.ts}|${e.agent}|${e.tool}`));
         if (newEntries.length > 0) {
           _feed = [..._feed, ...newEntries].sort((a, b) => b.ts.localeCompare(a.ts)).slice(0, 80);
+          // Flash matching tool nodes for any genuinely new backend tool calls.
+          newEntries.forEach(e => _flashTool(_toolKey(e.agent, e.tool)));
         }
       }
     } catch (_) { /* keep local feed */ }
@@ -242,18 +301,47 @@ window.MOCK_API = (() => {
     }
   }
 
+  async function _refreshNotifications() {
+    try {
+      const body = { limit: 30, include_read: true };
+      if (_notifCursor) body.since = _notifCursor;
+      const data = await _post(`${BASE.perform}/notifications/list`, body);
+      const items = Array.isArray(data?.notifications) ? data.notifications : [];
+      const arrivals = [];
+      if (items.length > 0) {
+        // Backend returns newest-first; merge avoiding dupes by id.
+        const known = new Set(_notifications.map(n => n.id));
+        for (const n of items) {
+          if (!known.has(n.id)) {
+            _notifications.unshift(n);
+            arrivals.push(n);
+          }
+        }
+        _notifications = _notifications.slice(0, 80);
+        if (data.cursor) _notifCursor = data.cursor;
+        else _notifCursor = items[0].ts;
+      }
+      if (typeof data?.unread_count === 'number') _notifUnread = data.unread_count;
+      const justArrived = _firstNotifPoll ? [] : arrivals;
+      _firstNotifPoll = false;
+      _notifListeners.forEach(fn => { try { fn(_notifications.slice(), _notifUnread, justArrived); } catch (_) {} });
+    } catch (_) { /* keep state */ }
+  }
+
   // Initial fetch + polling
-  Promise.all([_refreshApprovals(), _refreshGraph(), _refreshHealth(), _refreshFeed()]);
-  setInterval(_refreshApprovals, 5000);
-  setInterval(_refreshGraph,     30000);
-  setInterval(_refreshHealth,    8000);
-  setInterval(_refreshFeed,      10000);
+  Promise.all([_refreshApprovals(), _refreshGraph(), _refreshHealth(), _refreshFeed(), _refreshNotifications()]);
+  setInterval(_refreshApprovals,     5000);
+  setInterval(_refreshGraph,         30000);
+  setInterval(_refreshHealth,        8000);
+  setInterval(_refreshFeed,          10000);
+  setInterval(_refreshNotifications, 2500);
 
   // ── Local feed helper ───────────────────────────────────────────────────
 
   function _pushFeed(agent, tool, status, stub, meta) {
     _feed.unshift({ ts: new Date().toISOString(), agent, tool, status, stub, meta: meta || '', _new: true });
     _feed = _feed.slice(0, 80);
+    _flashTool(_toolKey(agent, tool));
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
@@ -277,21 +365,29 @@ window.MOCK_API = (() => {
     setTrace:  () => {},
 
     approve: async (id) => {
+      const action = _approvals.find(a => a.action_id === id);
+      const toolMap = {
+        send_slack: 'perf.slack', draft_slack: 'perf.slack',
+        send_email: 'perf.gmail',
+        schedule_meeting: 'perf.calendar',
+        create_jira: 'perf.jira', update_jira_status: 'perf.jira',
+      };
+      const execTool = toolMap[action?.action_type] || 'perf.slack';
       _approvals = _approvals.filter(a => a.action_id !== id);
       _pushFeed('perform_action', 'approve', 'DONE', false, id.slice(0, 12));
-      _liveTrace = { scenario: 'action', step: 1 };
-      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 2 }; }, 350);
-      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 3 }; }, 700);
-      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = null; }, 1300);
+      _liveTrace = { scenario: 'action', step: 1, tools: [] };
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 2, tools: ['perf.approval'] }; }, 350);
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 3, tools: [execTool] }; }, 800);
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 4, tools: [] }; }, 1500);
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = null; }, 2200);
       try { await _post(`${BASE.perform}/approvals/approve`, { action_id: id, approver: 'dashboard' }); } catch (_) {}
     },
 
     reject: async (id) => {
       _approvals = _approvals.filter(a => a.action_id !== id);
       _pushFeed('perform_action', 'reject', 'DONE', false, id.slice(0, 12));
-      _liveTrace = { scenario: 'action', step: 1 };
-      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 2 }; }, 350);
-      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 3 }; }, 700);
+      _liveTrace = { scenario: 'action', step: 1, tools: [] };
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 2, tools: ['perf.approval'] }; }, 350);
       setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = null; }, 1300);
       try { await _post(`${BASE.perform}/approvals/reject`, { action_id: id, reason: 'rejected via dashboard' }); } catch (_) {}
     },
@@ -300,18 +396,172 @@ window.MOCK_API = (() => {
       .filter(e => e.from_user === userId || e.to_user === userId)
       .sort((a, b) => b.timestamp.localeCompare(a.timestamp)),
 
+    // Submit a fresh action (e.g. "Schedule sync" on the escalation card).
+    // Optimistically inserts a pending_approval card so the UI updates instantly,
+    // then POSTs to the backend; on failure the optimistic card stays so the
+    // demo always has visible feedback.
+    submitAction: async ({ action_type, payload, title, summary, team, owner, owner_name, risk = 'high', priority = 'urgent', ticket_status = 'in_review' }) => {
+      const tempId = `pending-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const card = {
+        action_id: tempId, action_type,
+        title: title || action_type.replace(/_/g, ' '),
+        summary: summary || '',
+        team: team || '', owner: owner || '', ownerName: owner_name || '',
+        status: ticket_status, risk,
+        created_at: new Date().toISOString(),
+        stub: true,
+        payload,
+      };
+      _approvals = [card, ..._approvals];
+      _pushFeed('orchestrator', `submit:${action_type}`, 'DONE', false, (title || '').slice(0, 36));
+      _pushFeed('perform_action', 'approval_gate', 'PENDING', false, 'awaiting human');
+      // Light up the perform-agent path on the graph
+      _liveTrace = { scenario: 'action', step: 1, tools: [] };
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 2, tools: ['perf.approval'] }; }, 350);
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = null; }, 2200);
+      try {
+        const resp = await _post(`${BASE.perform}/actions`, {
+          action_type,
+          payload: typeof payload === 'string' ? payload : JSON.stringify(payload || {}),
+          title: card.title, summary: card.summary, team, owner, owner_name,
+          ticket_status, risk, priority,
+        });
+        if (resp && resp.action_id && resp.action_id !== tempId) {
+          // Replace optimistic id with real one so approve/reject hits backend correctly.
+          _approvals = _approvals.map(a => a.action_id === tempId ? { ...a, action_id: resp.action_id } : a);
+        }
+        return resp;
+      } catch (e) {
+        console.warn('submitAction failed, keeping optimistic card:', e);
+        return { action_id: tempId, action_type, success: false, pending_approval: true, error: String(e) };
+      }
+    },
+
+    scheduleEscalationSync: async (escalation) => {
+      const reason = (escalation && escalation.escalation && escalation.escalation.reason) || '';
+      const teamsInReason = ['Engineering', 'Design', 'GTM', 'Product'].filter(t => reason.includes(t));
+      // Calendar API needs real emails — match the seeded NovaLoop users
+      const teamMap = {
+        Engineering: { id: 'derek.vasquez', name: 'Derek Vasquez', email: 'derek.vasquez@novaloop.io' },
+        Design:      { id: 'priya.mehta',   name: 'Priya Mehta',   email: 'priya.mehta@novaloop.io' },
+        GTM:         { id: 'sam.okafor',    name: 'Sam Okafor',    email: 'sam.okafor@novaloop.io' },
+        Product:     { id: 'alice.chen',    name: 'Alice Chen',    email: 'alice.chen@novaloop.io' },
+      };
+      const attendees = (teamsInReason.length ? teamsInReason : ['Engineering', 'Design'])
+        .map(t => teamMap[t]).filter(Boolean);
+      const durationMin = 15;
+      const start = new Date(Date.now() + 60 * 60 * 1000);
+      const end   = new Date(start.getTime() + durationMin * 60 * 1000);
+      const startIso = start.toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const endIso   = end.toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const titleStr = `${teamsInReason.join(' × ') || 'Escalation'} sync`;
+      return window.MOCK_API.submitAction({
+        action_type: 'schedule_meeting',
+        title: `${titleStr} — ${durationMin} min`,
+        summary: escalation?.escalation?.recommended || 'Escalation sync',
+        team: 'Product', owner: 'alice.chen', owner_name: 'Alice Chen',
+        risk: 'high', priority: 'urgent', ticket_status: 'in_review',
+        // Match _action_schedule_meeting expected fields (start_time/end_time, email attendees)
+        payload: {
+          title: titleStr,
+          summary: titleStr,
+          attendees: attendees.map(a => a.email),
+          start_time: startIso,
+          end_time: endIso,
+          duration_minutes: durationMin,
+          time_zone: 'UTC',
+          description: `${escalation?.escalation?.reason || ''}\n\nRecommended: ${escalation?.escalation?.recommended || ''}\n\nAgenda:\n- Reconcile conflicting status reports\n- Decide go/no-go for launch`,
+        },
+      });
+    },
+
+    // ── Agent-to-agent resolution conversation ───────────────────────────
+    //
+    // Kicks off a backend conversation in which orchestrator delegates to
+    // status / historical agents and converges on a resolution. Returns the
+    // conversation_id so the UI can poll for streamed messages.
+    acceptAndStart: async (ticket) => {
+      const card = ticket || {};
+      _pushFeed('orchestrator', `accept:${card.action_type || 'action'}`, 'DONE', false, (card.title || '').slice(0, 36));
+      _liveTrace = { scenario: 'action', step: 1, tools: [] };
+      setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 2, tools: ['perf.approval'] }; }, 350);
+      try {
+        const resp = await _post(`${BASE.perform}/conversations/start`, {
+          action_id:   card.action_id || '',
+          action_type: card.action_type || '',
+          title:       card.title || '',
+          owner:       card.owner || '',
+          team:        card.team  || '',
+          summary:     card.summary || '',
+        });
+        return resp; // { conversation_id, action_id, status }
+      } catch (e) {
+        console.warn('acceptAndStart failed:', e);
+        return { conversation_id: '', action_id: card.action_id || '', status: 'failed', error: String(e) };
+      }
+    },
+
+    pollConversation: async (conversationId) => {
+      if (!conversationId) return null;
+      try {
+        return await _post(`${BASE.perform}/conversations/get`, { conversation_id: conversationId });
+      } catch (e) {
+        console.warn('pollConversation failed:', e);
+        return null;
+      }
+    },
+
+    finalizeAccepted: (actionId) => {
+      // Remove the card locally once the conversation has resolved.
+      _approvals = _approvals.filter(a => a.action_id !== actionId);
+      _liveTrace = null;
+    },
+
     getLiveTrace: () => _liveTrace,
+
+    // ── Notifications ────────────────────────────────────────────────────
+    listNotifications: () => _notifications.slice(),
+    unreadNotifications: () => _notifUnread,
+    onNotifications: (fn) => {
+      if (typeof fn !== 'function') return () => {};
+      _notifListeners.push(fn);
+      // Fire once with current snapshot so subscribers render immediately.
+      try { fn(_notifications.slice(), _notifUnread, []); } catch (_) {}
+      return () => { _notifListeners = _notifListeners.filter(x => x !== fn); };
+    },
+    markNotificationsRead: async (ids) => {
+      const idArr = Array.isArray(ids) ? ids : [ids].filter(Boolean);
+      if (idArr.length === 0) return;
+      _notifications = _notifications.map(n => idArr.includes(n.id) ? { ...n, read: true } : n);
+      _notifUnread = Math.max(0, _notifUnread - idArr.length);
+      _notifListeners.forEach(fn => { try { fn(_notifications.slice(), _notifUnread, []); } catch (_) {} });
+      try { await _post(`${BASE.perform}/notifications/mark_read`, { ids: idArr, all: false }); } catch (_) {}
+    },
+    markAllNotificationsRead: async () => {
+      _notifications = _notifications.map(n => ({ ...n, read: true }));
+      _notifUnread = 0;
+      _notifListeners.forEach(fn => { try { fn(_notifications.slice(), _notifUnread, []); } catch (_) {} });
+      try { await _post(`${BASE.perform}/notifications/mark_read`, { all: true }); } catch (_) {}
+    },
 
     // ── Brief & RAG HTTP endpoints ────────────────────────────────────────
 
     fetchBrief: async (topic, userEmail = 'demo@standin.ai') => {
-      _liveTrace = { scenario: 'status', step: 0 };
-      const t1 = setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = { scenario: 'status', step: 1 }; }, 900);
-      const t2 = setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = { scenario: 'status', step: 2 }; }, 2400);
+      // Step 0: user → orch
+      _liveTrace = { scenario: 'status', step: 0, tools: [] };
+      // Step 1: orch → status (FullBriefRequest)
+      const t1 = setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = { scenario: 'status', step: 1, tools: [] }; }, 700);
+      // Step 2: gather + rag (tool nodes light up on Status agent)
+      const t2 = setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = { scenario: 'status', step: 2, tools: ['status.gather', 'status.rag'] }; }, 1400);
+      // Step 3: synthesise tool fires
+      const t3 = setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = { scenario: 'status', step: 3, tools: ['status.synth'] }; }, 3200);
+      // Step 4: contradict + passports
+      const t4 = setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = { scenario: 'status', step: 4, tools: ['status.contradict', 'status.passports'] }; }, 5000);
       try {
         const result = await _postLong(`${BASE.status}/brief`, { topic, user_email: userEmail });
-        clearTimeout(t1); clearTimeout(t2);
-        _liveTrace = { scenario: 'status', step: 3 };
+        clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4);
+        // Step 5: status → orch (FullBriefResponse)
+        _liveTrace = { scenario: 'status', step: 5, tools: [] };
         _pushFeed('orchestrator', 'classify → status', 'DONE', false, (topic || '').slice(0, 28));
         if (result && result.mode !== 'error') {
           const live = result.mode === 'live';
@@ -323,10 +573,12 @@ window.MOCK_API = (() => {
           }
           _source = result.mode || 'live';
         }
-        setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = null; }, 1600);
+        // Step 6: orch → user
+        setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = { scenario: 'status', step: 6, tools: [] }; }, 700);
+        setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = null; }, 2200);
         return result;
       } catch (e) {
-        clearTimeout(t1); clearTimeout(t2);
+        clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4);
         _liveTrace = null;
         console.warn('fetchBrief failed:', e);
         return null;
@@ -334,17 +586,19 @@ window.MOCK_API = (() => {
     },
 
     askHistory: async (question) => {
-      // Steps 0-5 match the 6-step fan-out scenario in AF_SCENARIOS['history']
-      _liveTrace = { scenario: 'history', step: 0 };
+      _liveTrace = { scenario: 'history', step: 0, tools: [] };
       // step 1: orch → historical (fan-out arm 1)
-      const t1 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 1 }; }, 600);
-      // step 2: orch → status (fan-out arm 2, parallel)
-      const t2 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 2 }; }, 1100);
+      const t1 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 1, tools: [] }; }, 500);
+      // step 2: vector + mongo tools fire on historical
+      const t2 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 2, tools: ['hist.vector', 'hist.mongo'] }; }, 1100);
+      // step 3: historical synthesise tool
+      const t3 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 3, tools: ['hist.synth'] }; }, 2400);
+      // step 4: status arm fan-out (gather + rag + synth on status agent)
+      const t4 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 4, tools: ['status.gather', 'status.rag', 'status.synth'] }; }, 3600);
       try {
         const result = await _postLong(`${BASE.history}/ask`, { question });
-        clearTimeout(t1); clearTimeout(t2);
-        // step 3: historical → orch (RAGResponse arrives)
-        _liveTrace = { scenario: 'history', step: 3 };
+        clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4);
+        _liveTrace = { scenario: 'history', step: 5, tools: [] };
         _pushFeed('orchestrator', 'classify → fan-out', 'DONE', false, (question || '').slice(0, 28));
         if (result) {
           const method = result.retrieval_method || 'unknown';
@@ -356,16 +610,13 @@ window.MOCK_API = (() => {
           }
           _pushFeed('historical', 'synthesise', 'DONE', false, `conf=${result.confidence?.toFixed(2) || '?'}`);
         }
-        // step 4: status → orch (FullBriefResponse arrives, merge triggers)
-        setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 4 }; }, 400);
         _pushFeed('status_agent', 'gather+synthesise', 'DONE', false, 'fan-out arm 2');
-        // step 5: orch → user (merged reply)
-        setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 5 }; }, 900);
+        setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 6, tools: [] }; }, 900);
         _pushFeed('orchestrator', 'merge + reply', 'DONE', false, 'historical + live status');
-        setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = null; }, 1600);
+        setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = null; }, 2200);
         return result;
       } catch (e) {
-        clearTimeout(t1); clearTimeout(t2);
+        clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4);
         _liveTrace = null;
         console.warn('askHistory failed:', e);
         return null;

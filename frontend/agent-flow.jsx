@@ -6,19 +6,41 @@ const AF_NW = 144, AF_NH = 52, AF_NHW = AF_NW / 2, AF_NHH = AF_NH / 2;
 const AF_NODES = {
   user:       { cx: 400, cy: 52,  label: 'User / ASI:One',   sub: 'entry point',   c: 'oklch(0.62 0.008 60)' },
   orch:       { cx: 400, cy: 186, label: 'Orchestrator',     sub: 'port 8000',     c: 'oklch(0.72 0.14 245)' },
-  status:     { cx: 163, cy: 350, label: 'Status Agent',     sub: 'port 8007',     c: 'oklch(0.72 0.16 245)' },
-  historical: { cx: 400, cy: 350, label: 'Historical Agent', sub: 'port 8009',     c: 'oklch(0.72 0.18 305)' },
-  perform:    { cx: 637, cy: 350, label: 'Perform Action',   sub: 'port 8008',     c: 'oklch(0.74 0.16 55)' },
-  watchdog:   { cx: 90,  cy: 226, label: 'Watchdog',         sub: 'port 8010',     c: 'oklch(0.74 0.16 145)' },
+  status:     { cx: 163, cy: 320, label: 'Status Agent',     sub: 'port 8007',     c: 'oklch(0.72 0.16 245)' },
+  historical: { cx: 400, cy: 320, label: 'Historical Agent', sub: 'port 8009',     c: 'oklch(0.72 0.18 305)' },
+  perform:    { cx: 637, cy: 320, label: 'Perform Action',   sub: 'port 8008',     c: 'oklch(0.74 0.16 55)' },
+  watchdog:   { cx: 90,  cy: 196, label: 'Watchdog',         sub: 'port 8010',     c: 'oklch(0.74 0.16 145)' },
+};
+
+// Tool nodes — children of agents. cx,cy place a small pill below parent agent.
+const AF_TW = 92, AF_TH = 22;
+const AF_TOOLS = {
+  // Status agent tools (port 8007)
+  'status.gather':     { parent: 'status',     cx: 70,  cy: 410, label: 'gather',     icon: '⤓' },
+  'status.rag':        { parent: 'status',     cx: 70,  cy: 440, label: 'rag.search', icon: '🔍' },
+  'status.synth':      { parent: 'status',     cx: 168, cy: 410, label: 'synthesise', icon: '✦' },
+  'status.contradict': { parent: 'status',     cx: 168, cy: 440, label: 'contradict', icon: '⚡' },
+  'status.passports':  { parent: 'status',     cx: 266, cy: 425, label: 'passports',  icon: '⬢' },
+  // Historical agent tools (port 8009)
+  'hist.vector':       { parent: 'historical', cx: 308, cy: 410, label: 'vector',     icon: '◇' },
+  'hist.keyword':      { parent: 'historical', cx: 308, cy: 440, label: 'keyword',    icon: '⌕' },
+  'hist.synth':        { parent: 'historical', cx: 405, cy: 425, label: 'synthesise', icon: '✦' },
+  'hist.mongo':        { parent: 'historical', cx: 503, cy: 425, label: 'mongo.atlas',icon: '⬡' },
+  // Perform Action tools (port 8008)
+  'perf.approval':     { parent: 'perform',    cx: 545, cy: 425, label: 'approval',   icon: '🔒' },
+  'perf.slack':        { parent: 'perform',    cx: 643, cy: 410, label: 'slack',      icon: '#' },
+  'perf.jira':         { parent: 'perform',    cx: 643, cy: 440, label: 'jira',       icon: 'J' },
+  'perf.calendar':     { parent: 'perform',    cx: 740, cy: 410, label: 'calendar',   icon: '📅' },
+  'perf.gmail':        { parent: 'perform',    cx: 740, cy: 440, label: 'gmail',      icon: '✉' },
 };
 
 const AF_EDGES = [
   { id: 'user-orch',        from: 'user',     to: 'orch',       d: 'M 400 78 L 400 160' },
-  { id: 'orch-status',      from: 'orch',     to: 'status',     d: 'M 368 212 C 338 268 228 308 163 324' },
-  { id: 'orch-historical',  from: 'orch',     to: 'historical', d: 'M 400 212 L 400 324' },
-  { id: 'orch-perform',     from: 'orch',     to: 'perform',    d: 'M 432 212 C 462 268 572 308 637 324' },
-  { id: 'watchdog-status',  from: 'watchdog', to: 'status',     d: 'M 161 227 C 163 272 163 302 163 324' },
-  { id: 'watchdog-perform', from: 'watchdog', to: 'perform',    d: 'M 162 236 C 380 162 546 260 637 324' },
+  { id: 'orch-status',      from: 'orch',     to: 'status',     d: 'M 368 212 C 338 240 228 280 163 294' },
+  { id: 'orch-historical',  from: 'orch',     to: 'historical', d: 'M 400 212 L 400 294' },
+  { id: 'orch-perform',     from: 'orch',     to: 'perform',    d: 'M 432 212 C 462 240 572 280 637 294' },
+  { id: 'watchdog-status',  from: 'watchdog', to: 'status',     d: 'M 161 197 C 163 240 163 272 163 294' },
+  { id: 'watchdog-perform', from: 'watchdog', to: 'perform',    d: 'M 162 206 C 380 132 546 230 637 294' },
 ];
 
 const AF_SCENARIOS = [
@@ -36,6 +58,27 @@ const AF_SCENARIOS = [
         model: 'FullBriefRequest',
         payload: '{ user_email: "priya@novaloop.io", topic: "Launch Alpha", roles: null, session_id: null }',
         desc: 'Routed to Status Agent. All four roles (Eng, Design, GTM, Product) queried in parallel via Gemini synthesis.',
+      },
+      {
+        edge: 'orch-status', dir: 'fwd', active: ['status'],
+        tools: ['status.gather', 'status.rag'],
+        model: 'tool: gather()',
+        payload: 'gather(roles=[Eng, Design, GTM, Product]) → slack + jira + rag.search',
+        desc: 'Phase 1 — gather. Status Agent invokes gather tool: parallel async pulls from Slack, Jira, MongoDB RAG vector search across all four roles.',
+      },
+      {
+        edge: 'orch-status', dir: 'fwd', active: ['status'],
+        tools: ['status.synth'],
+        model: 'tool: synthesise()',
+        payload: 'gemini-2.5-flash · 4 parallel role syntheses · structured output',
+        desc: 'Phase 2 — synthesise. Status Agent invokes Gemini once per role to summarise gathered evidence into structured RoleStatus objects.',
+      },
+      {
+        edge: 'orch-status', dir: 'fwd', active: ['status'],
+        tools: ['status.contradict', 'status.passports'],
+        model: 'tool: contradict() + passports()',
+        payload: 'rule_engine: Design=ready ⊥ Eng=blocked → escalation_required=true',
+        desc: 'Phase 3+4 — contradict + passports. Rule engine detects Design/Eng conflict; Evidence Passports generated for both high-risk claims.',
       },
       {
         edge: 'orch-status', dir: 'rev', active: ['status', 'orch'],
@@ -67,10 +110,25 @@ const AF_SCENARIOS = [
         desc: 'Fan-out arm 1 → Historical Agent. MongoDB Atlas vector search on "Derek Vasquez blockers". Finds doc_derek_vasquez, doc_backend_ticket, NOVA-142.',
       },
       {
+        edge: 'orch-historical', dir: 'fwd', active: ['historical'],
+        tools: ['hist.vector', 'hist.mongo'],
+        model: 'tool: tier1_vector()',
+        payload: 'embed(question) · cosine k=6 · standin.documents',
+        desc: 'Tier 1 — vector search. Historical Agent embeds the query (Gemini text-embedding-004) and runs MongoDB Atlas Vector Search.',
+      },
+      {
+        edge: 'orch-historical', dir: 'fwd', active: ['historical'],
+        tools: ['hist.synth'],
+        model: 'tool: synthesise()',
+        payload: 'gemini-2.5-flash + retrieved context → answer',
+        desc: 'Synthesise tool runs Gemini over the retrieved docs to produce an answer with source_ids and confidence.',
+      },
+      {
         edge: 'orch-status', dir: 'fwd', active: ['orch', 'status'],
+        tools: ['status.gather', 'status.rag', 'status.synth'],
         model: 'FullBriefRequest (parallel)',
         payload: '{ context: "Derek Vasquez blockers", roles: null, user_email: "…" }',
-        desc: 'Fan-out arm 2 (parallel) → Status Agent. Phase 1: live JIRA + Slack + MongoDB RAG using the user\'s question. Phase 2: Gemini synthesis.',
+        desc: 'Fan-out arm 2 (parallel) → Status Agent. gather + rag.search + synthesise tools fire concurrently with the historical arm.',
       },
       {
         edge: 'orch-historical', dir: 'rev', active: ['historical', 'orch'],
@@ -108,6 +166,20 @@ const AF_SCENARIOS = [
         desc: 'Sent to Perform Action. schedule_meeting requires human approval — written to pending_approvals collection.',
       },
       {
+        edge: 'orch-perform', dir: 'fwd', active: ['perform'],
+        tools: ['perf.approval'],
+        model: 'tool: approval_gate()',
+        payload: 'risk=high · approval_required=true · queued in standin.pending_approvals',
+        desc: 'Approval gate fires. Calendar tool execution is held until a human approves the action via the Attention Board.',
+      },
+      {
+        edge: 'orch-perform', dir: 'fwd', active: ['perform'],
+        tools: ['perf.calendar'],
+        model: 'tool: calendar.schedule (deferred)',
+        payload: 'mcp__claude_ai_Google_Calendar (stubbed) · attendees=[priya,derek,alice]',
+        desc: 'Calendar MCP tool prepared (stub mode). Will execute on approve.',
+      },
+      {
         edge: 'orch-perform', dir: 'rev', active: ['perform', 'orch'],
         model: 'ActionResponse',
         payload: '{ success: true, stub: true, action_id: "act_7f3a…", pending_approval: true }',
@@ -138,9 +210,10 @@ const AF_SCENARIOS = [
       },
       {
         edge: 'watchdog-perform', dir: 'fwd', active: ['watchdog', 'perform'],
+        tools: ['perf.slack'],
         model: 'ActionRequest',
         payload: '{ action_type: "draft_slack", payload: { channel: "#eng-leads", text: "⚠ Eng confidence dropped to 0.41" } }',
-        desc: 'Watchdog fires draft_slack. No approval required — drafts are non-destructive.',
+        desc: 'Watchdog fires draft_slack. Slack MCP tool runs without approval — drafts are non-destructive.',
       },
       {
         edge: 'watchdog-perform', dir: 'rev', active: ['perform', 'watchdog'],
@@ -171,7 +244,7 @@ function AgentFlowGraph({ activeTrace }) {
     const t = setInterval(() => {
       const lt = window.MOCK_API.getLiveTrace ? window.MOCK_API.getLiveTrace() : null;
       liveRef.current = lt;
-      setLiveTrace(lt ? { scenario: lt.scenario, step: lt.step } : null);
+      setLiveTrace(lt ? { scenario: lt.scenario, step: lt.step, tools: lt.tools || [] } : null);
     }, 250);
     return () => clearInterval(t);
   }, []);
@@ -216,6 +289,10 @@ function AgentFlowGraph({ activeTrace }) {
   const step       = scenario.steps[stIdx] || scenario.steps[0];
   const edgeDef    = AF_EDGES.find(e => e.id === step.edge);
   const activeNodes = new Set(step.active || []);
+  const activeTools = new Set([
+    ...(step.tools || []),
+    ...((liveTrace && liveTrace.tools) || []),
+  ]);
   const isRev      = step.dir === 'rev';
 
   return (
@@ -261,7 +338,7 @@ function AgentFlowGraph({ activeTrace }) {
 
       {/* SVG Graph */}
       <div className="af-stage">
-        <svg viewBox="0 0 800 415" className="af-svg" preserveAspectRatio="xMidYMid meet">
+        <svg viewBox="0 0 800 480" className="af-svg" preserveAspectRatio="xMidYMid meet">
           <defs>
             <pattern id="af-grid" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
               <path d="M 32 0 L 0 0 0 32" fill="none"
@@ -274,7 +351,7 @@ function AgentFlowGraph({ activeTrace }) {
           </defs>
 
           {/* Background grid */}
-          <rect width="800" height="415" fill="url(#af-grid)" opacity="0.35"/>
+          <rect width="800" height="480" fill="url(#af-grid)" opacity="0.35"/>
 
           {/* Dim static edges */}
           {AF_EDGES.map(e => (
@@ -379,6 +456,65 @@ function AgentFlowGraph({ activeTrace }) {
                       <animate attributeName="opacity" dur="1.2s" repeatCount="indefinite"
                         values="0.9;0.3;0.9"/>
                     )}
+                  </circle>
+                )}
+              </g>
+            );
+          })}
+
+          {/* Tool connectors — thin static lines from agent → tool */}
+          {Object.entries(AF_TOOLS).map(([id, t]) => {
+            const parent = AF_NODES[t.parent];
+            if (!parent) return null;
+            const toolActive = activeTools.has(id);
+            return (
+              <line key={`tc-${id}`}
+                x1={parent.cx} y1={parent.cy + 26}
+                x2={t.cx} y2={t.cy}
+                stroke={toolActive ? parent.c : 'oklch(0.275 0.010 60)'}
+                strokeWidth={toolActive ? 1.4 : 0.9}
+                strokeDasharray={toolActive ? '0' : '3 3'}
+                opacity={toolActive ? 0.85 : 0.5}/>
+            );
+          })}
+
+          {/* Tool nodes */}
+          {Object.entries(AF_TOOLS).map(([id, t]) => {
+            const parent = AF_NODES[t.parent];
+            if (!parent) return null;
+            const isToolActive = activeTools.has(id);
+            const tColor = isToolActive ? parent.c : 'oklch(0.50 0.010 60)';
+            const halfW = AF_TW / 2, halfH = AF_TH / 2;
+            return (
+              <g key={`tn-${id}`} className="af-tool-g">
+                {isToolActive && (
+                  <rect
+                    x={t.cx - halfW - 4} y={t.cy - halfH - 4}
+                    width={AF_TW + 8} height={AF_TH + 8} rx="8"
+                    fill={parent.c} opacity="0.16"
+                    style={{ filter: 'blur(5px)' }}/>
+                )}
+                <rect
+                  x={t.cx - halfW} y={t.cy - halfH}
+                  width={AF_TW} height={AF_TH} rx="5"
+                  fill={isToolActive ? 'oklch(0.235 0.010 60)' : 'oklch(0.200 0.009 60)'}
+                  stroke={tColor}
+                  strokeWidth={isToolActive ? 1.2 : 0.8}
+                  opacity={isToolActive ? 1 : 0.85}/>
+                <text x={t.cx} y={t.cy + 3.5}
+                  textAnchor="middle"
+                  fill={isToolActive ? 'oklch(0.95 0.004 60)' : 'oklch(0.66 0.008 60)'}
+                  fontSize="9.5" fontWeight={isToolActive ? '600' : '500'}
+                  fontFamily="Geist Mono, JetBrains Mono, monospace"
+                  letterSpacing="-0.2">
+                  <tspan opacity="0.85">{t.icon}</tspan>
+                  <tspan dx="4">{t.label}</tspan>
+                </text>
+                {isToolActive && animated && (
+                  <circle cx={t.cx + halfW - 6} cy={t.cy - halfH + 5}
+                    r="2.2" fill={parent.c} opacity="0.95">
+                    <animate attributeName="opacity" dur="0.9s" repeatCount="indefinite"
+                      values="0.95;0.25;0.95"/>
                   </circle>
                 )}
               </g>

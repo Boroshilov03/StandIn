@@ -6,6 +6,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from uagents import Agent, Context, Model
@@ -799,6 +800,43 @@ async def approve_action(ctx: Context, req: ApproveRequest) -> ApproveResponse:
             f"Action approved | id={req.action_id} | type={action_type} | "
             f"approver={req.approver} | success={success}"
         )
+
+        # Proactive notifications — high-signal events only
+        if success and action_type == "schedule_meeting":
+            attendees = payload.get("attendees") or []
+            attendee_str = ", ".join(attendees[:3]) + (" +more" if len(attendees) > 3 else "")
+            link = payload.get("calendar_html_link") or ""
+            _emit_notification(
+                kind="meeting.created",
+                title=f"Sync scheduled: {payload.get('title') or 'StandIn meeting'}",
+                body=f"Attendees: {attendee_str or 'TBD'}" + (f"\n{link}" if link else ""),
+                severity="success",
+                action_id=req.action_id,
+                team=doc.get("team"),
+                owner=doc.get("owner"),
+                extra={"calendar_html_link": link, "calendar_event_id": payload.get("calendar_event_id")},
+            )
+        elif success:
+            _emit_notification(
+                kind="action.executed",
+                title=f"{action_type.replace('_', ' ').title()} delivered",
+                body=(doc.get("title") or result or "")[:300],
+                severity="success",
+                action_id=req.action_id,
+                team=doc.get("team"),
+                owner=doc.get("owner"),
+            )
+        else:
+            _emit_notification(
+                kind="action.failed",
+                title=f"{action_type.replace('_', ' ').title()} failed",
+                body=(result or "Action handler reported failure.")[:300],
+                severity="warning",
+                action_id=req.action_id,
+                team=doc.get("team"),
+                owner=doc.get("owner"),
+            )
+
         return ApproveResponse(
             action_id=req.action_id, action_type=action_type,
             approved=success, result=result,
@@ -824,6 +862,19 @@ async def reject_action(ctx: Context, req: RejectRequest) -> RejectResponse:
         )
         ctx.logger.info(
             f"Action rejected | id={req.action_id} | reason={req.reason}"
+        )
+        try:
+            rdoc = db["pending_approvals"].find_one({"action_id": req.action_id}) or {}
+        except Exception:
+            rdoc = {}
+        _emit_notification(
+            kind="action.rejected",
+            title=f"Action rejected: {rdoc.get('title') or req.action_id[:18]}",
+            body=req.reason or "No reason given.",
+            severity="info",
+            action_id=req.action_id,
+            team=rdoc.get("team"),
+            owner=rdoc.get("owner"),
         )
         return RejectResponse(action_id=req.action_id, rejected=True)
     except Exception as exc:
@@ -966,6 +1017,108 @@ async def get_graph(ctx: Context) -> GraphResponse:
 # Action log feed endpoint — used by dashboard pipeline trace
 # ---------------------------------------------------------------------------
 
+class _ActionSubmitRest(Model):
+    """REST shim — same shape as ActionRequest, but tolerates missing request_id."""
+    action_type: str
+    payload: str
+    request_id: str | None = None
+    context: str | None = None
+    priority: str | None = "normal"
+    title: str | None = None
+    summary: str | None = None
+    team: str | None = None
+    owner: str | None = None
+    owner_name: str | None = None
+    ticket_status: str | None = None
+    risk: str | None = "medium"
+
+
+class _ActionSubmitRestResponse(Model):
+    """REST shim response — exposes whether the action queued for approval."""
+    action_id: str
+    action_type: str
+    success: bool
+    pending_approval: bool = False
+    error: str | None = None
+    result: str | None = None
+
+
+@agent.on_rest_post("/actions", _ActionSubmitRest, _ActionSubmitRestResponse)
+async def submit_action(ctx: Context, req: _ActionSubmitRest) -> _ActionSubmitRestResponse:
+    """
+    Submit a fresh action from the dashboard (e.g. 'Schedule sync' button).
+    Approval-gated actions land in standin.pending_approvals; the UI then
+    surfaces a card the user must approve before execution.
+    """
+    request_id = req.request_id or str(uuid.uuid4())
+
+    # Capture the inner handler's outbound ActionResponse via a fake sender.
+    captured: dict = {}
+
+    class _CaptureCtx:
+        def __init__(self, real):
+            self.logger = real.logger
+        async def send(self, sender, response):
+            captured["resp"] = response
+
+    inner_msg = ActionRequest(
+        request_id=request_id,
+        action_type=req.action_type,
+        payload=req.payload,
+        context=req.context,
+        priority=req.priority or "normal",
+        title=req.title,
+        summary=req.summary,
+        team=req.team,
+        owner=req.owner,
+        owner_name=req.owner_name,
+        ticket_status=req.ticket_status,
+        risk=req.risk or "medium",
+    )
+
+    try:
+        await _handle_action_inner(_CaptureCtx(ctx), "dashboard", inner_msg)
+    except Exception as exc:
+        ctx.logger.error(f"submit_action failed: {exc}", exc_info=True)
+        return _ActionSubmitRestResponse(
+            action_id=request_id,
+            action_type=req.action_type,
+            success=False,
+            error=f"Internal error: {exc}",
+        )
+
+    resp: ActionResponse = captured.get("resp")
+    if resp is None:
+        return _ActionSubmitRestResponse(
+            action_id=request_id,
+            action_type=req.action_type,
+            success=False,
+            error="No response from action handler.",
+        )
+    pending = (resp.result or "").lower().startswith("pending_approval") or \
+              (req.action_type in _APPROVAL_REQUIRED)
+
+    if pending and (req.priority or "").lower() == "urgent":
+        _emit_notification(
+            kind="escalation.opened",
+            title=f"Escalation queued: {req.title or req.action_type}",
+            body=req.summary or "Awaiting agent resolution.",
+            severity="critical",
+            action_id=resp.action_id,
+            team=req.team,
+            owner=req.owner,
+        )
+
+    return _ActionSubmitRestResponse(
+        action_id=resp.action_id,
+        action_type=resp.action_type,
+        success=resp.success,
+        pending_approval=pending,
+        error=resp.error,
+        result=resp.result,
+    )
+
+
 @agent.on_rest_get("/log", FeedResponse)
 async def get_log(ctx: Context) -> FeedResponse:
     """
@@ -997,6 +1150,555 @@ async def get_log(ctx: Context) -> FeedResponse:
     except Exception as exc:
         ctx.logger.warning(f"log endpoint failed: {exc}")
         return FeedResponse(entries=[], source="fallback")
+
+
+# ---------------------------------------------------------------------------
+# Notifications — proactive feed of high-signal events for the dashboard
+# ---------------------------------------------------------------------------
+#
+# Anything worth interrupting the user about goes here: a meeting got booked,
+# an agent conversation resolved, an escalation opened, a watchdog flagged a
+# status change. We persist to standin.notifications so the bell icon can
+# backfill on page load, and the UI cursor-polls /notifications/list every
+# few seconds for live arrivals.
+
+_NOTIFICATIONS_COLL = "notifications"
+
+
+def _emit_notification(
+    kind: str,
+    title: str,
+    body: str = "",
+    severity: str = "info",          # 'info' | 'success' | 'warning' | 'critical'
+    action_id: str | None = None,
+    conversation_id: str | None = None,
+    owner: str | None = None,
+    team: str | None = None,
+    extra: dict | None = None,
+) -> str | None:
+    """Insert a notification row. Safe no-op when MongoDB is unavailable."""
+    if not _MONGODB_URI:
+        return None
+    note_id = f"note-{uuid.uuid4().hex[:10]}"
+    doc = {
+        "id": note_id,
+        "ts": datetime.now(UTC).isoformat(),
+        "kind": kind,
+        "severity": severity,
+        "title": title[:160],
+        "body": (body or "")[:480],
+        "action_id": action_id,
+        "conversation_id": conversation_id,
+        "owner": owner,
+        "team": team,
+        "extra": extra or {},
+        "read": False,
+    }
+    try:
+        db = _get_db()
+        db[_NOTIFICATIONS_COLL].insert_one(dict(doc))
+        # Mongo mutates the dict (adds _id) — strip it before logging
+        _LOGGER.info(f"notify | {kind} | {severity} | {title[:80]}")
+        return note_id
+    except Exception as exc:
+        _LOGGER.warning(f"notify failed ({kind}): {exc}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Agent-to-agent resolution conversations
+# ---------------------------------------------------------------------------
+#
+# When the user clicks "Accept" on an attention card, we kick off a simulated
+# agent conversation: orchestrator delegates to status / historical / perform
+# action, they exchange findings, and converge on a resolution. Messages are
+# persisted to MongoDB and streamed to the dashboard via polling.
+
+_CONVERSATIONS_COLL = "agent_conversations"
+
+_AGENT_PROFILES = {
+    "orchestrator":     {"label": "Our Orchestrator",        "tone": "orch",     "org": "ours"},
+    "status_agent":     {"label": "Status Agent",            "tone": "stat",     "org": "ours"},
+    "historical_agent": {"label": "Historical Agent",        "tone": "hist",     "org": "ours"},
+    "perform_action":   {"label": "Perform Action",          "tone": "perf",     "org": "ours"},
+    "watchdog":         {"label": "Watchdog",                "tone": "watch",    "org": "ours"},
+    # Peer agents — represent OTHER users' StandIn agents (cross-org A2A handshake).
+    "peer_engineering": {"label": "Engineering · StandIn",   "tone": "peer-eng", "org": "engineering"},
+    "peer_design":      {"label": "Design · StandIn",        "tone": "peer-des", "org": "design"},
+    "peer_gtm":         {"label": "GTM · StandIn",           "tone": "peer-gtm", "org": "gtm"},
+    "peer_product":     {"label": "Product · StandIn",       "tone": "peer-prd", "org": "product"},
+}
+
+
+# Map a team name to its peer agent id (used to pick counterparty for the dialog).
+def _peer_for_team(team: str) -> str:
+    t = (team or "").strip().lower()
+    if t.startswith("eng"):     return "peer_engineering"
+    if t.startswith("des"):     return "peer_design"
+    if t.startswith("gtm"):     return "peer_gtm"
+    if t.startswith("pro"):     return "peer_product"
+    return "peer_engineering"
+
+
+def _conversation_script(action_type: str, title: str, owner: str, team: str, summary: str) -> list[dict]:
+    """
+    Returns an ordered list of messages: {from, to, kind, content, delay_ms}.
+
+    Models a cross-org agent-to-agent (A2A) negotiation: our user's
+    orchestrator opens a channel with the *counterparty user's* StandIn
+    orchestrator (e.g. Engineering's StandIn, Design's StandIn). Internal
+    helpers (status / historical) chime in only when our orchestrator needs
+    grounding, so the dialog reads as peer-to-peer.
+    """
+    owner_label = owner or "owner"
+    team_label  = team or "team"
+    title_label = title or action_type.replace("_", " ").title()
+    primary_peer = _peer_for_team(team)
+
+    if action_type == "schedule_meeting":
+        # Cross-org negotiation between two peer orchestrators
+        peer_a = "peer_engineering"
+        peer_b = "peer_design"
+        return [
+            {"from": "orchestrator", "to": peer_a, "kind": "handshake",
+             "content": f"Hi — opening A2A channel re: '{title_label}'. Conflict on launch readiness. Are you available to coordinate?", "delay_ms": 700},
+            {"from": peer_a, "to": "orchestrator", "kind": "handshake",
+             "content": "Acknowledged. Engineering side: NOVA-142 is currently blocked on the /v1 → /v2 contract change pushed last night. Need 15 min to align.", "delay_ms": 1300},
+            {"from": "orchestrator", "to": peer_b, "kind": "handshake",
+             "content": f"Looping in Design — Engineering is reporting a blocker. You marked the launch page as ready. Can you confirm scope?", "delay_ms": 900},
+            {"from": peer_b, "to": "orchestrator", "kind": "finding",
+             "content": "Confirming — launch page is shipped and tested against /v1. We can re-test against /v2 but need ~10 min with Eng on the call.", "delay_ms": 1200},
+            {"from": "orchestrator", "to": "historical_agent", "kind": "delegate",
+             "content": "Has this contract-version mismatch happened before on Launch Alpha? Pull last 14 days.", "delay_ms": 800},
+            {"from": "historical_agent", "to": "orchestrator", "kind": "finding",
+             "content": "2 prior incidents (NOVA-097, NOVA-118) — both resolved by a 15-min sync between Eng + Design leads. Avg time-to-unblock: 22 min.", "delay_ms": 1200},
+            {"from": "orchestrator", "to": peer_a, "kind": "decision",
+             "content": "Proposal: 15-min sync, Eng + Design only, in 1 hour. GTM not required at this stage. Confirm?", "delay_ms": 800},
+            {"from": peer_a, "to": "orchestrator", "kind": "decision",
+             "content": "Confirmed. Derek is free at the proposed slot.", "delay_ms": 1000},
+            {"from": peer_b, "to": "orchestrator", "kind": "decision",
+             "content": "Confirmed on Design side. Priya will join.", "delay_ms": 900},
+            {"from": "orchestrator", "to": "perform_action", "kind": "delegate",
+             "content": "All parties agreed. Book the 15-min sync.", "delay_ms": 700},
+            {"from": "perform_action", "to": "orchestrator", "kind": "tool_call",
+             "content": "calendar.create_event → 15 min · attendees: derek.vasquez@novaloop.io, priya.mehta@novaloop.io", "delay_ms": 1100},
+            {"from": "perform_action", "to": "orchestrator", "kind": "completed",
+             "content": "Meeting created. Calendar invites sent to both peer agents. Action item logged.", "delay_ms": 900},
+        ]
+
+    if action_type in ("send_slack", "draft_slack"):
+        peer = primary_peer
+        return [
+            {"from": "orchestrator", "to": peer, "kind": "handshake",
+             "content": f"Opening A2A — need to ping {owner_label} re: '{title_label}'. Are they reachable on your end?", "delay_ms": 700},
+            {"from": peer, "to": "orchestrator", "kind": "finding",
+             "content": f"{owner_label} is online, active in #launch-alpha. No DND. Safe to ping.", "delay_ms": 1100},
+            {"from": "orchestrator", "to": "status_agent", "kind": "delegate",
+             "content": "Confirm message context is still valid (status hasn't shifted in last 30 min).", "delay_ms": 700},
+            {"from": "status_agent", "to": "orchestrator", "kind": "finding",
+             "content": f"{team_label} status unchanged. Context still valid.", "delay_ms": 1000},
+            {"from": "orchestrator", "to": peer, "kind": "decision",
+             "content": "Sending now — will keep continuity in the existing thread.", "delay_ms": 700},
+            {"from": "orchestrator", "to": "perform_action", "kind": "delegate",
+             "content": f"Deliver Slack to @{owner_label}.", "delay_ms": 600},
+            {"from": "perform_action", "to": "orchestrator", "kind": "tool_call",
+             "content": f"slack.post_message → @{owner_label}", "delay_ms": 1000},
+            {"from": "perform_action", "to": "orchestrator", "kind": "completed",
+             "content": "Slack delivered. Thread linked to evidence passport.", "delay_ms": 800},
+        ]
+
+    if action_type == "send_email":
+        peer = primary_peer
+        return [
+            {"from": "orchestrator", "to": peer, "kind": "handshake",
+             "content": f"Need to email {owner_label} re: '{title_label}'. Sharing thread context first.", "delay_ms": 700},
+            {"from": peer, "to": "orchestrator", "kind": "finding",
+             "content": "Acknowledged. Owner has 1 prior thread on this topic — last reply 3 days ago. Continuity recommended.", "delay_ms": 1200},
+            {"from": "orchestrator", "to": "perform_action", "kind": "decision",
+             "content": "Send as reply on existing thread.", "delay_ms": 700},
+            {"from": "perform_action", "to": "orchestrator", "kind": "tool_call",
+             "content": f"gmail.send → {owner_label}", "delay_ms": 1100},
+            {"from": "perform_action", "to": "orchestrator", "kind": "completed",
+             "content": "Email queued. Tracking pixel disabled per policy.", "delay_ms": 800},
+        ]
+
+    if action_type in ("create_jira", "update_jira_status"):
+        peer = primary_peer
+        return [
+            {"from": "orchestrator", "to": peer, "kind": "handshake",
+             "content": f"Coordinating ticket '{title_label}'. Confirm scope on your side?", "delay_ms": 700},
+            {"from": peer, "to": "orchestrator", "kind": "finding",
+             "content": f"Scope confirmed. Owner = {owner_label}. Priority matches current Q126SPRINT.", "delay_ms": 1100},
+            {"from": "orchestrator", "to": "perform_action", "kind": "decision",
+             "content": "Update ticket in Q126SPRINT.", "delay_ms": 700},
+            {"from": "perform_action", "to": "orchestrator", "kind": "tool_call",
+             "content": "jira.transition → Q126SPRINT", "delay_ms": 1000},
+            {"from": "perform_action", "to": "orchestrator", "kind": "completed",
+             "content": "Jira updated. Linked back to evidence passport.", "delay_ms": 800},
+        ]
+
+    # generic fallback
+    peer = primary_peer
+    return [
+        {"from": "orchestrator", "to": peer, "kind": "handshake",
+         "content": f"Opening A2A — need to align on '{title_label}'. Ready?", "delay_ms": 700},
+        {"from": peer, "to": "orchestrator", "kind": "finding",
+         "content": f"Ready. {summary[:140] or 'No new blockers on our side.'}", "delay_ms": 1100},
+        {"from": "orchestrator", "to": "perform_action", "kind": "decision",
+         "content": "Proceed with the action as queued.", "delay_ms": 700},
+        {"from": "perform_action", "to": "orchestrator", "kind": "tool_call",
+         "content": f"{action_type} → executing", "delay_ms": 1000},
+        {"from": "perform_action", "to": "orchestrator", "kind": "completed",
+         "content": "Done. Logged to action_log.", "delay_ms": 800},
+    ]
+
+
+def _conv_now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _conv_init_doc(conversation_id: str, action_id: str, action_type: str,
+                   title: str, owner: str, team: str, summary: str,
+                   participants: list[str]) -> dict:
+    return {
+        "conversation_id": conversation_id,
+        "action_id": action_id,
+        "action_type": action_type,
+        "title": title,
+        "owner": owner,
+        "team": team,
+        "summary": summary,
+        "topic": title or action_type.replace("_", " ").title(),
+        "status": "running",
+        "started_at": _conv_now(),
+        "updated_at": _conv_now(),
+        "participants": participants,
+        "messages": [],
+    }
+
+
+async def _run_conversation(conversation_id: str, script: list[dict], action_id: str) -> None:
+    """
+    Background task: stream messages into MongoDB on a realistic cadence,
+    then mark the conversation resolved and approve the underlying action.
+    """
+    if not _MONGODB_URI:
+        return
+    try:
+        db = _get_db()
+        coll = db[_CONVERSATIONS_COLL]
+    except Exception as exc:
+        _LOGGER.warning(f"conversation runner: db unavailable ({exc})")
+        return
+
+    for i, step in enumerate(script):
+        await asyncio.sleep(max(step.get("delay_ms", 800), 300) / 1000.0)
+        msg = {
+            "id": f"m-{i+1:02d}",
+            "ts": _conv_now(),
+            "from": step["from"],
+            "to":   step["to"],
+            "kind": step["kind"],
+            "content": step["content"],
+        }
+        try:
+            coll.update_one(
+                {"conversation_id": conversation_id},
+                {"$push": {"messages": msg}, "$set": {"updated_at": _conv_now()}},
+            )
+        except Exception as exc:
+            _LOGGER.warning(f"conversation push failed: {exc}")
+            return
+
+    # Mark resolved + approve underlying pending action (if any)
+    try:
+        conv_doc = coll.find_one({"conversation_id": conversation_id}, {"_id": 0})
+        coll.update_one(
+            {"conversation_id": conversation_id},
+            {"$set": {"status": "resolved", "updated_at": _conv_now()}},
+        )
+        if action_id:
+            db["pending_approvals"].update_one(
+                {"action_id": action_id, "status": "pending"},
+                {"$set": {"status": "approved", "approved_at": _conv_now(),
+                          "approved_by": "agent_conversation"}},
+            )
+        topic = (conv_doc or {}).get("topic") or "ticket"
+        action_type = (conv_doc or {}).get("action_type") or ""
+        _emit_notification(
+            kind="conversation.resolved",
+            title=f"Agents resolved: {topic}",
+            body=f"Cross-agent conversation reached a decision via {action_type or 'agent_handoff'}.",
+            severity="success",
+            action_id=action_id,
+            conversation_id=conversation_id,
+            team=(conv_doc or {}).get("team"),
+            owner=(conv_doc or {}).get("owner"),
+        )
+    except Exception as exc:
+        _LOGGER.warning(f"conversation finalize failed: {exc}")
+
+
+class _ConvStartReq(Model):
+    action_id: str
+    action_type: str = ""
+    title: str = ""
+    owner: str = ""
+    team: str = ""
+    summary: str = ""
+
+
+class _ConvMessage(Model):
+    id: str
+    ts: str
+    sender: str
+    recipient: str
+    kind: str
+    content: str
+
+
+class _ConvState(Model):
+    conversation_id: str
+    action_id: str
+    action_type: str
+    topic: str
+    status: str  # 'running' | 'resolved' | 'failed' | 'unknown'
+    started_at: str
+    updated_at: str
+    participants: List[str]
+    messages: List[_ConvMessage]
+
+
+class _ConvStartResp(Model):
+    conversation_id: str
+    action_id: str
+    status: str
+    error: Optional[str] = None
+
+
+class _ConvGetReq(Model):
+    conversation_id: str
+
+
+@agent.on_rest_post("/conversations/start", _ConvStartReq, _ConvStartResp)
+async def start_conversation(ctx: Context, req: _ConvStartReq) -> _ConvStartResp:
+    """Kick off an agent-to-agent conversation to resolve an attention card."""
+    if not _MONGODB_URI:
+        return _ConvStartResp(
+            conversation_id="", action_id=req.action_id, status="failed",
+            error="MONGODB_URI not configured",
+        )
+
+    action_type = req.action_type or "generic"
+    title       = req.title or ""
+    owner       = req.owner or ""
+    team        = req.team or ""
+    summary     = req.summary or ""
+
+    # If caller didn't supply, look up the pending action.
+    try:
+        db = _get_db()
+        if not action_type or not title:
+            doc = db["pending_approvals"].find_one({"action_id": req.action_id})
+            if doc:
+                action_type = action_type or doc.get("action_type", "generic")
+                title       = title       or doc.get("title", "")
+                owner       = owner       or doc.get("owner", "")
+                team        = team        or doc.get("team", "")
+                summary     = summary     or doc.get("summary", "")
+    except Exception as exc:
+        ctx.logger.warning(f"start_conversation lookup failed: {exc}")
+
+    script       = _conversation_script(action_type, title, owner, team, summary)
+    participants = sorted({s["from"] for s in script} | {s["to"] for s in script})
+    conversation_id = f"conv-{uuid.uuid4().hex[:10]}"
+
+    try:
+        db = _get_db()
+        db[_CONVERSATIONS_COLL].insert_one(
+            _conv_init_doc(
+                conversation_id, req.action_id, action_type,
+                title, owner, team, summary, participants,
+            )
+        )
+    except Exception as exc:
+        ctx.logger.error(f"start_conversation insert failed: {exc}")
+        return _ConvStartResp(
+            conversation_id="", action_id=req.action_id, status="failed",
+            error=str(exc),
+        )
+
+    asyncio.create_task(_run_conversation(conversation_id, script, req.action_id))
+    ctx.logger.info(
+        f"Conversation started | id={conversation_id} | action={req.action_id} | "
+        f"type={action_type} | steps={len(script)}"
+    )
+    return _ConvStartResp(
+        conversation_id=conversation_id, action_id=req.action_id, status="running",
+    )
+
+
+def _conv_doc_to_state(doc: dict) -> _ConvState:
+    msgs = [
+        _ConvMessage(
+            id=m.get("id", ""),
+            ts=m.get("ts", ""),
+            sender=m.get("from", ""),
+            recipient=m.get("to", ""),
+            kind=m.get("kind", "message"),
+            content=m.get("content", ""),
+        )
+        for m in (doc.get("messages") or [])
+    ]
+    return _ConvState(
+        conversation_id=doc.get("conversation_id", ""),
+        action_id=doc.get("action_id", ""),
+        action_type=doc.get("action_type", ""),
+        topic=doc.get("topic", ""),
+        status=doc.get("status", "unknown"),
+        started_at=doc.get("started_at", ""),
+        updated_at=doc.get("updated_at", ""),
+        participants=list(doc.get("participants") or []),
+        messages=msgs,
+    )
+
+
+@agent.on_rest_post("/conversations/get", _ConvGetReq, _ConvState)
+async def get_conversation(ctx: Context, req: _ConvGetReq) -> _ConvState:
+    """Return the current state (messages + status) of a conversation."""
+    if not _MONGODB_URI:
+        return _ConvState(
+            conversation_id=req.conversation_id, action_id="", action_type="",
+            topic="", status="unknown", started_at="", updated_at="",
+            participants=[], messages=[],
+        )
+    try:
+        db = _get_db()
+        doc = db[_CONVERSATIONS_COLL].find_one(
+            {"conversation_id": req.conversation_id}, {"_id": 0},
+        )
+        if not doc:
+            return _ConvState(
+                conversation_id=req.conversation_id, action_id="", action_type="",
+                topic="", status="unknown", started_at="", updated_at="",
+                participants=[], messages=[],
+            )
+        return _conv_doc_to_state(doc)
+    except Exception as exc:
+        ctx.logger.error(f"get_conversation failed: {exc}")
+        return _ConvState(
+            conversation_id=req.conversation_id, action_id="", action_type="",
+            topic="", status="failed", started_at="", updated_at="",
+            participants=[], messages=[],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Notifications — REST endpoints
+# ---------------------------------------------------------------------------
+
+
+class _NotificationItem(Model):
+    id: str
+    ts: str
+    kind: str
+    severity: str
+    title: str
+    body: str
+    action_id: Optional[str] = None
+    conversation_id: Optional[str] = None
+    owner: Optional[str] = None
+    team: Optional[str] = None
+    read: bool = False
+
+
+class _NotifListReq(Model):
+    since: Optional[str] = None  # ISO timestamp; only newer than this
+    limit: int = 30
+    include_read: bool = True
+
+
+class _NotifListResp(Model):
+    notifications: List[_NotificationItem]
+    unread_count: int
+    cursor: str  # latest ts in this batch (or echo `since` if empty)
+
+
+class _NotifMarkReadReq(Model):
+    ids: List[str] = []
+    all: bool = False
+
+
+class _NotifMarkReadResp(Model):
+    updated: int
+
+
+@agent.on_rest_post("/notifications/list", _NotifListReq, _NotifListResp)
+async def list_notifications(ctx: Context, req: _NotifListReq) -> _NotifListResp:
+    """Return notifications newer than `since` (ISO ts). Use returned `cursor`
+    for the next call to avoid duplicates. Falls back gracefully when Mongo
+    is unconfigured."""
+    if not _MONGODB_URI:
+        return _NotifListResp(notifications=[], unread_count=0, cursor=req.since or "")
+    try:
+        db = _get_db()
+        coll = db[_NOTIFICATIONS_COLL]
+
+        query: dict = {}
+        if req.since:
+            query["ts"] = {"$gt": req.since}
+        if not req.include_read:
+            query["read"] = False
+
+        limit = max(1, min(int(req.limit or 30), 100))
+        docs = list(
+            coll.find(query, {"_id": 0})
+                .sort("ts", -1)
+                .limit(limit)
+        )
+
+        items = [
+            _NotificationItem(
+                id=d.get("id", ""),
+                ts=d.get("ts", ""),
+                kind=d.get("kind", "unknown"),
+                severity=d.get("severity", "info"),
+                title=d.get("title", ""),
+                body=d.get("body", ""),
+                action_id=d.get("action_id"),
+                conversation_id=d.get("conversation_id"),
+                owner=d.get("owner"),
+                team=d.get("team"),
+                read=bool(d.get("read", False)),
+            )
+            for d in docs
+        ]
+        unread_count = coll.count_documents({"read": False})
+        cursor = items[0].ts if items else (req.since or "")
+        return _NotifListResp(notifications=items, unread_count=unread_count, cursor=cursor)
+    except Exception as exc:
+        ctx.logger.warning(f"list_notifications failed: {exc}")
+        return _NotifListResp(notifications=[], unread_count=0, cursor=req.since or "")
+
+
+@agent.on_rest_post("/notifications/mark_read", _NotifMarkReadReq, _NotifMarkReadResp)
+async def mark_notifications_read(ctx: Context, req: _NotifMarkReadReq) -> _NotifMarkReadResp:
+    """Mark specific notifications (or all) as read."""
+    if not _MONGODB_URI:
+        return _NotifMarkReadResp(updated=0)
+    try:
+        db = _get_db()
+        coll = db[_NOTIFICATIONS_COLL]
+        if req.all:
+            res = coll.update_many({"read": False}, {"$set": {"read": True}})
+        elif req.ids:
+            res = coll.update_many({"id": {"$in": list(req.ids)}}, {"$set": {"read": True}})
+        else:
+            return _NotifMarkReadResp(updated=0)
+        return _NotifMarkReadResp(updated=int(getattr(res, "modified_count", 0)))
+    except Exception as exc:
+        ctx.logger.warning(f"mark_notifications_read failed: {exc}")
+        return _NotifMarkReadResp(updated=0)
 
 
 # ---------------------------------------------------------------------------
