@@ -139,12 +139,12 @@ window.MOCK_API = (() => {
     return r.json();
   }
 
-  async function _post(url, body) {
+  async function _post(url, body, timeoutMs = 6000) {
     const r = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!r.ok) throw new Error(`${r.status}`);
     return r.json();
@@ -152,14 +152,7 @@ window.MOCK_API = (() => {
 
   // Long-timeout POST for operations that run the full agent pipeline (~30s)
   async function _postLong(url, body) {
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(45000),
-    });
-    if (!r.ok) throw new Error(`${r.status}`);
-    return r.json();
+    return _post(url, body, 45000);
   }
 
   // Map BE PendingAction → FE card shape
@@ -486,7 +479,7 @@ window.MOCK_API = (() => {
       _liveTrace = { scenario: 'action', step: 1, tools: [] };
       setTimeout(() => { if (_liveTrace?.scenario === 'action') _liveTrace = { scenario: 'action', step: 2, tools: ['perf.approval'] }; }, 350);
       try {
-        const resp = await _post(`${BASE.perform}/conversations/start`, {
+        const resp = await _postLong(`${BASE.perform}/conversations/start`, {
           action_id:   card.action_id || '',
           action_type: card.action_type || '',
           title:       card.title || '',
@@ -504,7 +497,7 @@ window.MOCK_API = (() => {
     pollConversation: async (conversationId) => {
       if (!conversationId) return null;
       try {
-        return await _post(`${BASE.perform}/conversations/get`, { conversation_id: conversationId });
+        return await _post(`${BASE.perform}/conversations/get`, { conversation_id: conversationId }, 15000);
       } catch (e) {
         console.warn('pollConversation failed:', e);
         return null;

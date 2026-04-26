@@ -37,7 +37,12 @@ PROXY_ROUTES = {
 }
 
 # Long-running POST routes (agent pipeline can take up to 60s)
-SLOW_ROUTES = {"/api/status/brief", "/api/history/ask"}
+SLOW_ROUTES = {
+    "/api/status/brief",
+    "/api/history/ask",
+    "/api/perform/conversations/start",
+    "/api/perform/conversations/get",
+}
 FAST_TIMEOUT = 8
 SLOW_TIMEOUT = 60
 
