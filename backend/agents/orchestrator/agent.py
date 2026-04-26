@@ -151,6 +151,12 @@ Rules:
 - Keep topic short and literal.
 - time_window should only be set when clearly present.
 - action_payload_json must be a compact JSON object string when action_request.
+- For create_jira payload, include:
+  {summary, description, issuetype, priority, labels, status, sprint_name}
+  and prefer defaults: issuetype=Task, priority=Medium, labels=["standin","auto-created"], status="To Do", sprint_name="Sprint 1".
+- For schedule_meeting payload, prefer defaults:
+  duration_minutes=30, time_zone="UTC", attendees=[].
+- For send_slack payload, include channel and default to "#standin-updates" when unspecified.
 """.strip()
 
 
@@ -228,16 +234,20 @@ def _infer_action_payload(text: str, action_type: str | None) -> dict:
 
     if action_type in {"send_slack", "draft_slack"}:
         channel_match = re.search(r"(#\w[\w-]*)", text)
-        payload["channel"] = channel_match.group(1) if channel_match else "#general"
+        payload["channel"] = channel_match.group(1) if channel_match else "#standin-updates"
         payload["text"] = text
     elif action_type == "send_email":
         payload["to"] = []
         payload["subject"] = "StandIn request"
         payload["body"] = text
     elif action_type == "create_jira":
-        payload["project"] = "NOVA"
         payload["summary"] = text[:120]
         payload["description"] = text
+        payload["issuetype"] = "Task"
+        payload["priority"] = "Medium"
+        payload["labels"] = ["standin", "auto-created"]
+        payload["status"] = "To Do"
+        payload["sprint_name"] = "Sprint 1"
     elif action_type == "update_jira_status":
         ticket_match = re.search(r"\b([A-Z]{2,10}-\d+)\b", text)
         payload["ticket_id"] = ticket_match.group(1) if ticket_match else ""
@@ -248,6 +258,7 @@ def _infer_action_payload(text: str, action_type: str | None) -> dict:
         payload["attendees"] = []
         payload["start_time"] = _extract_time_window(text) or ""
         payload["duration_minutes"] = 30
+        payload["time_zone"] = "UTC"
         payload["description"] = text
     elif action_type == "read_calendar_events":
         payload["max_results"] = 10
