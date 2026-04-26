@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 try:
-    from aiohttp import web, ClientSession, ClientConnectorError
+    from aiohttp import web, ClientSession, ClientConnectorError, ClientTimeout
 except ImportError:
     print("aiohttp not installed — run: pip install aiohttp")
     sys.exit(1)
@@ -27,11 +27,19 @@ except ImportError:
 ROOT = Path(__file__).parent
 PORT = int(os.getenv("STANDIN_PORT", "3000"))
 
+# All agents share the Bureau on port 8000; route via x-uagents-address header.
+BUREAU_URL = "http://localhost:8000"
+
 PROXY_ROUTES = {
-    "/api/perform/": "http://localhost:8008/",
-    "/api/status/":  "http://localhost:8007/",
-    "/api/history/": "http://localhost:8009/",
+    "/api/perform/": (BUREAU_URL + "/", "agent1qf83fffdv22j2etuqarww9nwqcenq5zavvekh7k2utflqaxx08j4x38e69v"),
+    "/api/status/":  (BUREAU_URL + "/", "agent1q2l8xf3dvwvmarl2dpxwtv5ym7pvge53szhstykukmrwuhm93z6k68tphgh"),
+    "/api/history/": (BUREAU_URL + "/", "agent1qf60yzmr9reyjnduq8qneum5nf03zzaw60cl6yny9l7la676unf7jdfdtrv"),
 }
+
+# Long-running POST routes (agent pipeline can take up to 60s)
+SLOW_ROUTES = {"/api/status/brief", "/api/history/ask"}
+FAST_TIMEOUT = 8
+SLOW_TIMEOUT = 60
 
 CORS = {
     "Access-Control-Allow-Origin":  "*",
@@ -40,10 +48,10 @@ CORS = {
 }
 
 
-def _proxy_target(path: str) -> str | None:
-    for prefix, base in PROXY_ROUTES.items():
+def _proxy_target(path: str) -> tuple[str, str] | None:
+    for prefix, (base, agent_addr) in PROXY_ROUTES.items():
         if path.startswith(prefix):
-            return base + path[len(prefix):]
+            return base + path[len(prefix):], agent_addr
     return None
 
 
@@ -51,25 +59,31 @@ async def handle_api(request: web.Request) -> web.Response:
     if request.method == "OPTIONS":
         return web.Response(status=204, headers=CORS)
 
-    target = _proxy_target(request.path)
-    if not target:
+    match = _proxy_target(request.path)
+    if not match:
         return web.Response(status=404, text='{"error":"no proxy route"}',
                             content_type="application/json", headers=CORS)
 
+    target, agent_addr = match
+    timeout = ClientTimeout(total=SLOW_TIMEOUT if request.path in SLOW_ROUTES else FAST_TIMEOUT)
+    fwd_headers = {
+        "Content-Type": "application/json",
+        "x-uagents-address": agent_addr,
+    }
     try:
         async with ClientSession() as session:
             if request.method == "POST":
                 body = await request.read()
                 async with session.post(
                     target, data=body,
-                    headers={"Content-Type": "application/json"},
-                    timeout=8,
+                    headers=fwd_headers,
+                    timeout=timeout,
                 ) as resp:
                     data = await resp.read()
                     return web.Response(body=data, status=resp.status,
                                         content_type="application/json", headers=CORS)
             else:
-                async with session.get(target, timeout=8) as resp:
+                async with session.get(target, headers=fwd_headers, timeout=timeout) as resp:
                     data = await resp.read()
                     return web.Response(body=data, status=resp.status,
                                         content_type="application/json", headers=CORS)
@@ -105,7 +119,7 @@ def build_app() -> web.Application:
 
 if __name__ == "__main__":
     print(f"\n  StandIn Dashboard  →  http://localhost:{PORT}\n")
-    for prefix, target in PROXY_ROUTES.items():
-        print(f"  {prefix}*  →  {target}*")
+    for prefix, (base, addr) in PROXY_ROUTES.items():
+        print(f"  {prefix}*  →  {base}* (agent: {addr[:20]}…)")
     print()
     web.run_app(build_app(), host="0.0.0.0", port=PORT, print=lambda *_: None)

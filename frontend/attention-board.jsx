@@ -5,6 +5,11 @@ function AttentionBoard({ tweaks }) {
   const [resolving, setResolving] = useState({}); // action_id -> 'resolving' | 'rejected'
   const [filter, setFilter] = useState('all');
   const [teamFilter, setTeamFilter] = useState('all');
+  const [query, setQuery] = useState('');
+  const [briefLoading, setBriefLoading] = useState(false);
+  const [brief, setBrief] = useState(null);
+  const [historyResult, setHistoryResult] = useState(null);
+  const [queryMode, setQueryMode] = useState('status');
 
   // Auto-poll every 3s to feel live
   useEffect(() => {
@@ -37,6 +42,31 @@ function AttentionBoard({ tweaks }) {
     });
   }, [approvals, filter, teamFilter]);
 
+  const _HISTORY_RE = /\b(what was|what were|what happened|decided|decision|previous|last\s+\w+|yesterday|history|historical|meeting notes|discussed|agenda|when did|did we|before the|earlier)\b/i;
+
+  async function handleQuery(e) {
+    e.preventDefault();
+    const q = query.trim();
+    if (!q) return;
+    setBriefLoading(true);
+    setBrief(null);
+    setHistoryResult(null);
+    const isHistory = _HISTORY_RE.test(q);
+    setQueryMode(isHistory ? 'history' : 'status');
+    // Jump to Orchestration tab so the user can watch the live agent chain
+    if (tweaks && tweaks.navigateToMonitor) tweaks.navigateToMonitor();
+    if (isHistory) {
+      const result = await window.MOCK_API.askHistory(q);
+      setHistoryResult(result);
+    } else {
+      const result = await window.MOCK_API.fetchBrief(q);
+      setBrief(result);
+    }
+    setBriefLoading(false);
+    // Return to Attention Board to show the result
+    if (tweaks && tweaks.navigateToAttention) tweaks.navigateToAttention();
+  }
+
   function handleResolve(id) {
     setResolving(s => ({ ...s, [id]: 'resolving' }));
     if (tweaks && tweaks.activateTrace) tweaks.activateTrace('perform');
@@ -58,6 +88,31 @@ function AttentionBoard({ tweaks }) {
 
   return (
     <React.Fragment>
+      <div className="standin-query">
+        <form className="query-form" onSubmit={handleQuery}>
+          <input
+            className="query-input"
+            type="text"
+            placeholder="Ask StandIn — e.g. Launch Alpha readiness · what was decided last week?"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            disabled={briefLoading}
+          />
+          <button className="btn primary" type="submit" disabled={briefLoading || !query.trim()}>
+            {briefLoading ? 'Running…' : 'Get brief'}
+          </button>
+        </form>
+        {briefLoading && (
+          <div className="query-loading">
+            {queryMode === 'history'
+              ? 'Searching knowledge base…'
+              : 'Gathering status from all teams — this takes 5–15 seconds…'}
+          </div>
+        )}
+        {brief && <BriefResult brief={brief} />}
+        {historyResult && <HistoryResult result={historyResult} />}
+      </div>
+
       <div className="page-header">
         <div>
           <h1>Attention board</h1>
@@ -204,4 +259,97 @@ function PayloadPreview({ payload }) {
   );
 }
 
-Object.assign(window, { AttentionBoard });
+function HistoryResult({ result }) {
+  if (!result) return null;
+  return (
+    <div className="brief-result">
+      <div style={{ fontSize: 13, color: 'var(--fg-2)', marginBottom: 10, fontFamily: 'var(--font-mono)' }}>
+        historical · {result.retrieval_method}
+      </div>
+      <p style={{ margin: '0 0 12px', lineHeight: 1.65, color: 'var(--fg-0)' }}>{result.answer}</p>
+      {result.source_ids && result.source_ids.length > 0 && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+          {result.source_ids.map(s => (
+            <span key={s} className="status-pill stub" style={{ fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+              <span className="dot"/> {s}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="brief-meta">
+        confidence {Math.round((result.confidence || 0) * 100)}%
+        {' · '}sources: {result.source_ids?.length ?? 0}
+      </div>
+    </div>
+  );
+}
+
+function BriefResult({ brief }) {
+  const roles = brief.role_statuses || [];
+  const passports = brief.evidence_passports || [];
+
+  return (
+    <div className="brief-result">
+      {brief.escalation_required && (
+        <div className="escalation" role="alert">
+          <div className="escalation-icon">!</div>
+          <div className="escalation-body">
+            <div className="escalation-title">Escalation Required</div>
+            <div className="escalation-text">{brief.escalation_reason}</div>
+            <div className="escalation-meta">recommended → {brief.recommended_action}</div>
+          </div>
+        </div>
+      )}
+
+      <div className="brief-roles">
+        {roles.map(rs => (
+          <div key={rs.role} className={`brief-role team-${rs.role}`}>
+            <div className="brief-role-head">
+              <TeamBadge team={rs.role} />
+              <StatusPill status={rs.status} />
+              <span className="brief-conf">{Math.round((rs.confidence || 0) * 100)}%</span>
+              {rs.mode === 'seeded' && <span className="status-pill stub"><span className="dot"/>seeded</span>}
+            </div>
+            <p className="brief-role-summary">{rs.summary}</p>
+            {rs.blockers && rs.blockers.length > 0 && (
+              <ul className="brief-blockers">
+                {rs.blockers.map((b, i) => <li key={i}>{b}</li>)}
+              </ul>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {passports.length > 0 && (
+        <details className="brief-passports">
+          <summary>Evidence passports ({passports.length})</summary>
+          <div className="passport-list">
+            {passports.map((p, i) => (
+              <div key={i} className="passport-card">
+                <div className="passport-claim">{p.claim}</div>
+                <div className="passport-meta">
+                  <span><b>{p.owner}</b></span>
+                  <span>confidence {Math.round((p.confidence || 0) * 100)}%</span>
+                  <RiskBadge risk={p.confidence >= 0.85 ? 'low' : p.confidence >= 0.7 ? 'medium' : 'high'} />
+                </div>
+                {p.contradictions && p.contradictions.length > 0 && (
+                  <div className="passport-contradiction">{p.contradictions[0]}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+
+      <div className="brief-meta">
+        overall confidence {Math.round((brief.overall_confidence || 0) * 100)}%
+        {' · '}mode: {brief.mode}
+        {brief.delta_claims && brief.delta_claims.length > 0 && (
+          <span> · {brief.delta_claims.length} change(s) since last brief</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { AttentionBoard, BriefResult });

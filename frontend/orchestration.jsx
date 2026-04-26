@@ -6,14 +6,27 @@ const TRACE_ACCENTS = {
   perform:    { color: 'var(--gtm)',    bg: 'oklch(0.30 0.10 55)'  },
 };
 
-function OrchestrationMonitor({ activeTrace }) {
-  const [monTab, setMonTab] = useState('flow');
-  const [feed, setFeed]     = useState(() => window.MOCK_API.listFeed());
+// Maps AF_SCENARIOS ids → TRACE_ACCENTS keys
+const _SC_TO_ACCENT = { status: 'status', history: 'historical', action: 'perform' };
+
+function OrchestrationMonitor({ activeTrace: propActiveTrace }) {
+  const [monTab, setMonTab]   = useState('flow');
+  const [feed, setFeed]       = useState(() => window.MOCK_API.listFeed());
+  const [liveTrace, setLiveTrace] = useState(null);
 
   useEffect(() => {
-    const t = setInterval(() => setFeed(window.MOCK_API.listFeed()), 1500);
+    const t = setInterval(() => {
+      setFeed(window.MOCK_API.listFeed());
+      const lt = window.MOCK_API.getLiveTrace ? window.MOCK_API.getLiveTrace() : null;
+      setLiveTrace(lt);
+    }, 800);
     return () => clearInterval(t);
   }, []);
+
+  // Live trace takes priority over tweaks-panel prop
+  const activeTrace = liveTrace
+    ? (_SC_TO_ACCENT[liveTrace.scenario] || propActiveTrace)
+    : propActiveTrace;
 
   const accent      = TRACE_ACCENTS[activeTrace] || null;
   const accentStyle = accent ? { '--accent': accent.color, '--accent-bg': accent.bg } : {};
@@ -107,19 +120,26 @@ function OrchestrationMonitor({ activeTrace }) {
 
           <div className="feed-col">
             <h2>Tool call feed</h2>
-            <p>Live log of recent tool calls and actions. Polled every 1.5 s.</p>
-            <div className="feed-list">
-              <div className="feed-thead">
-                <span>time</span>
-                <span>agent</span>
-                <span>tool</span>
-                <span>status</span>
-                <span>detail</span>
+            <p>Live log of recent tool calls and actions. Updated on each request.</p>
+            {feed.length === 0 ? (
+              <div className="feed-empty">
+                <span className="feed-empty-icon">○</span>
+                No requests yet — run a query from <b>Attention Board</b> (tab 1) to see the live pipeline trace here.
               </div>
-              {feed.map((row, i) => (
-                <FeedRow key={i + row.ts} row={row}/>
-              ))}
-            </div>
+            ) : (
+              <div className="feed-list">
+                <div className="feed-thead">
+                  <span>time</span>
+                  <span>agent</span>
+                  <span>tool</span>
+                  <span>status</span>
+                  <span>detail</span>
+                </div>
+                {feed.map((row, i) => (
+                  <FeedRow key={i + row.ts} row={row}/>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}

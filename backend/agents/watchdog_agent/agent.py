@@ -61,8 +61,8 @@ agent = Agent(
     name="watchdog_agent",
     seed=_SEED,
     port=_PORT,
-    mailbox=True,
-    publish_agent_details=True,
+    mailbox=False,
+    publish_agent_details=False,
 )
 
 # Tracks in-flight check requests so we can match responses
