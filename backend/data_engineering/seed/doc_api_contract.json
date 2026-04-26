@@ -1,0 +1,12 @@
+{
+  "id": "doc_api_contract",
+  "filename": "doc_api_contract.json",
+  "title": "NovaLoop Checkout API Contract — v2 Specification",
+  "type": "api_spec",
+  "role": "Engineering",
+  "author": "derek.vasquez",
+  "timestamp": "2026-04-25T02:00:00Z",
+  "tags": ["api", "checkout", "v2", "spec", "engineering", "contract"],
+  "content": "CHECKOUT API v2 CONTRACT\nVersion: 2.0.0 | Published: 2026-04-25 02:00 UTC | Author: Derek Vasquez\n\nBase URL: https://api.novaloop.io/v2\n\nPOST /v2/checkout\nAuthentication: Bearer token (Authorization header)\n\nRequest body:\n{\n  'cart_id': string (required),\n  'payment_method_token': string (required),  // replaces card_details in v1\n  'promo_code': string (optional),\n  'idempotency_key': string (recommended)\n}\n\nResponse 200:\n{\n  'checkout_session_id': string,  // new in v2\n  'status': 'confirmed' | 'pending' | 'failed',\n  'total_charged_cents': integer,\n  'confirmation_number': string\n}\n\nMigration from v1:\n- Replace /v1/checkout with /v2/checkout in all client calls\n- Replace card_details object with payment_method_token string\n- Handle checkout_session_id in response (idempotency)\n- v1 endpoint deprecated — will return 410 on 2026-05-01\n\nStatus: BREAKING CHANGE — all integrations must update before 2026-04-28 launch",
+  "sensitive_flags": []
+}

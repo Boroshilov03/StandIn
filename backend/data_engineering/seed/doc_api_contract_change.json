@@ -1,0 +1,12 @@
+{
+  "id": "doc_api_contract_change",
+  "filename": "doc_api_contract_change.json",
+  "title": "Checkout API Contract Change — /v1 → /v2",
+  "type": "technical_notice",
+  "role": "Engineering",
+  "author": "derek.vasquez",
+  "timestamp": "2026-04-25T01:45:00Z",
+  "tags": ["api", "checkout", "v2", "migration", "breaking-change", "launch-alpha"],
+  "content": "BREAKING CHANGE — 2026-04-25 01:45 UTC\n\nThe checkout API endpoint has been migrated to v2 as part of the payment processor upgrade.\n\nOld endpoint: POST /v1/checkout\nNew endpoint: POST /v2/checkout\n\nChanges in v2:\n- Request body now requires `payment_method_token` instead of `card_details`\n- Response includes `checkout_session_id` for idempotency\n- /v1/checkout is deprecated and will return 410 Gone on 2026-05-01\n\nAll integrations must update before Monday 2026-04-28 launch. The launch page integration (NOVA-142) has been filed as a critical blocker. Derek Vasquez is leading the fix. QA smoke test (NOVA-143) is blocked pending integration update.",
+  "sensitive_flags": []
+}

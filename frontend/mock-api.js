@@ -334,25 +334,35 @@ window.MOCK_API = (() => {
     },
 
     askHistory: async (question) => {
+      // Steps 0-5 match the 6-step fan-out scenario in AF_SCENARIOS['history']
       _liveTrace = { scenario: 'history', step: 0 };
-      const t1 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 1 }; }, 700);
-      const t2 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 2 }; }, 1600);
+      // step 1: orch → historical (fan-out arm 1)
+      const t1 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 1 }; }, 600);
+      // step 2: orch → status (fan-out arm 2, parallel)
+      const t2 = setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 2 }; }, 1100);
       try {
         const result = await _postLong(`${BASE.history}/ask`, { question });
         clearTimeout(t1); clearTimeout(t2);
+        // step 3: historical → orch (RAGResponse arrives)
         _liveTrace = { scenario: 'history', step: 3 };
-        _pushFeed('orchestrator', 'classify → history', 'DONE', false, (question || '').slice(0, 28));
+        _pushFeed('orchestrator', 'classify → fan-out', 'DONE', false, (question || '').slice(0, 28));
         if (result) {
           const method = result.retrieval_method || 'unknown';
           const tier1  = method === 'vector_search';
-          const tier2  = method === 'keyword_search';
-          _pushFeed('historical', 'tier1_vector',  tier1 ? 'DONE' : 'MISS', !tier1, tier1 ? `sim=${result.confidence?.toFixed(2)}` : 'no match');
+          const tier2  = method === 'keyword_search' || method === 'keyword';
+          _pushFeed('historical', 'tier1_vector',  tier1 ? 'DONE' : 'MISS', !tier1, tier1 ? `conf=${result.confidence?.toFixed(2)}` : 'no match');
           if (!tier1) {
             _pushFeed('historical', 'tier2_keyword', tier2 ? 'DONE' : 'MISS', false, tier2 ? 'bm25 hit' : 'no match');
           }
           _pushFeed('historical', 'synthesise', 'DONE', false, `conf=${result.confidence?.toFixed(2) || '?'}`);
         }
-        setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = null; }, 1400);
+        // step 4: status → orch (FullBriefResponse arrives, merge triggers)
+        setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 4 }; }, 400);
+        _pushFeed('status_agent', 'gather+synthesise', 'DONE', false, 'fan-out arm 2');
+        // step 5: orch → user (merged reply)
+        setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = { scenario: 'history', step: 5 }; }, 900);
+        _pushFeed('orchestrator', 'merge + reply', 'DONE', false, 'historical + live status');
+        setTimeout(() => { if (_liveTrace?.scenario === 'history') _liveTrace = null; }, 1600);
         return result;
       } catch (e) {
         clearTimeout(t1); clearTimeout(t2);

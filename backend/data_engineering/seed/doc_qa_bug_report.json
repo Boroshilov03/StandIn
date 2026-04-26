@@ -1,0 +1,12 @@
+{
+  "id": "doc_qa_bug_report",
+  "filename": "doc_qa_bug_report.json",
+  "title": "QA Bug Report — Checkout Smoke Test Failure",
+  "type": "qa_report",
+  "role": "Engineering",
+  "author": "kai.torres",
+  "timestamp": "2026-04-25T08:05:00Z",
+  "tags": ["qa", "smoke-test", "checkout", "blocked", "nova-143", "launch-alpha"],
+  "content": "QA SMOKE TEST FAILURE — Launch Alpha Pre-Launch Check\nReporter: Kai Torres | Date: 2026-04-25 08:05 UTC\nTicket: NOVA-143 | Status: BLOCKED\n\nTest: Checkout flow end-to-end smoke test (staging environment)\nResult: FAIL\n\nFailure details:\n- Step: Submit checkout form\n- Expected: 200 OK with checkout_session_id\n- Actual: 404 Not Found at POST /v2/checkout\n- Error: The launch page integration is still calling /v1/checkout. The v2 endpoint is live but the client has not been updated.\n\nBlocked by: NOVA-142 (launch page integration update)\nEstimated unblock: Pending Derek's fix merge\n\nAll other smoke test steps PASS. Checkout integration is the only blocker for QA sign-off.",
+  "sensitive_flags": []
+}

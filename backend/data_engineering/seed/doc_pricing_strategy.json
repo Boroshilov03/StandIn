@@ -1,0 +1,12 @@
+{
+  "id": "doc_pricing_strategy",
+  "filename": "doc_pricing_strategy.json",
+  "title": "Checkout AI Assistant — Launch Pricing Strategy (Confidential)",
+  "type": "strategy_doc",
+  "role": "GTM",
+  "author": "sam.okafor",
+  "timestamp": "2026-04-22T11:00:00Z",
+  "tags": ["gtm", "pricing", "strategy", "confidential", "launch-alpha"],
+  "content": "LAUNCH PRICING STRATEGY — CONFIDENTIAL\nAuthor: Sam Okafor | Date: 2026-04-22 11:00 UTC\nDistribution: Internal only — do not share externally\n\nLaunch tiers:\n\nStarter (Free):\n- Up to 500 AI checkout summaries/month\n- 1 store integration\n- Standard support\n\nGrowth ($49/month):\n- Unlimited AI summaries\n- 5 store integrations\n- Priority support\n- Analytics dashboard\n\nEnterprise (custom):\n- Unlimited everything\n- Dedicated support\n- SLA guarantees\n- Custom integrations\n\n[CONFIDENTIAL: Introductory offer — first 3 months free on Growth plan for beta waitlist]\nThis pricing is not yet public. Legal review in progress (NOVA-141) for the free-trial language.\nDo not include actual price points in any external communication until legal clears.\n\nCompetitive note: Competitor X charges $79/month for equivalent features. $49 positions us aggressively.",
+  "sensitive_flags": ["confidential_pricing"]
+}

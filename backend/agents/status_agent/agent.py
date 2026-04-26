@@ -25,6 +25,7 @@ from models import (
     VerifyRequest,
     VerifyResponse,
 )
+import gx10_client
 try:
     from services.calendar_service import list_events as list_calendar_events
 except Exception:
@@ -100,8 +101,8 @@ ALL_ROLES = ["Engineering", "Design", "GTM", "Product"]
 ROLE_CONFIGS: dict[str, dict] = {
     "Engineering": {
         "team": "Engineering",
-        "slack_queries": ["checkout API v2 migration", "NOVA-142 blocked", "deployment"],
-        "jira_query": "checkout API blocked deployment",
+        "slack_queries": ["blocked", "deployment", "API", "bug", "backend"],
+        "jira_query": "blocked bug backend",
         "lens": (
             "Precise and technical. Surface API status, deployment blockers, "
             "ticket states. Risk-first: default to high if uncertain."
@@ -110,8 +111,8 @@ ROLE_CONFIGS: dict[str, dict] = {
     },
     "Design": {
         "team": "Design",
-        "slack_queries": ["launch page", "design assets", "sign-off", "final"],
-        "jira_query": "launch page design assets handoff",
+        "slack_queries": ["design", "handoff", "review", "assets", "sign-off"],
+        "jira_query": "design review handoff",
         "lens": (
             "Visual and completion-focused. Surface asset delivery, "
             "sign-off status, and any open design blockers."
@@ -120,8 +121,8 @@ ROLE_CONFIGS: dict[str, dict] = {
     },
     "GTM": {
         "team": "GTM",
-        "slack_queries": ["launch email", "pricing", "legal approval", "comms"],
-        "jira_query": "GTM launch email pricing legal approval",
+        "slack_queries": ["launch", "marketing", "email", "legal", "comms"],
+        "jira_query": "launch marketing communications",
         "lens": (
             "Market-focused. Surface launch comms status, "
             "approval gates, and send-time readiness."
@@ -130,8 +131,8 @@ ROLE_CONFIGS: dict[str, dict] = {
     },
     "Product": {
         "team": None,  # sees all teams
-        "slack_queries": ["launch readiness", "go no-go", "blocker", "deadline"],
-        "jira_query": "launch alpha critical blocker readiness",
+        "slack_queries": ["blocker", "deadline", "priority", "go-no-go", "readiness"],
+        "jira_query": "blocker priority",
         "lens": (
             "Outcome-focused. Synthesise the cross-functional picture: "
             "critical path, go/no-go criteria, stakeholder risks."
@@ -301,6 +302,13 @@ def _slack_list_channels() -> dict[str, str]:
             _slack_ch_cache_ts = time.time()
     except Exception as exc:
         _LOGGER.debug(f"conversations.list failed: {exc}")
+    # Fall back to SLACK_CHANNEL_ID env var if list is empty (e.g. missing scope)
+    if not _slack_ch_cache:
+        _ch_id = os.getenv("SLACK_CHANNEL_ID", "")
+        if _ch_id:
+            _slack_ch_cache = {"#standin": _ch_id}
+            _slack_ch_cache_ts = time.time()
+            _LOGGER.debug(f"conversations.list empty — seeding cache from SLACK_CHANNEL_ID={_ch_id}")
     return _slack_ch_cache
 
 
@@ -415,63 +423,144 @@ def _tool_slack_search_local(queries: list[str], team: str | None, limit: int) -
     return results[:limit]
 
 
+def _log_slack_results(results: list[dict], source: str, role: str) -> None:
+    if not results:
+        _LOGGER.info(f"  Slack [{role}] {source}: 0 messages")
+        return
+    _LOGGER.info(f"  Slack [{role}] {source}: {len(results)} message(s)")
+    for i, r in enumerate(results):
+        snippet = r["content"][:120].replace("\n", " ")
+        _LOGGER.info(f"    [{i+1}] id={r['source_id']} ts={r.get('timestamp','')[:19]} | {snippet}")
+
+
 async def _tool_slack_search(queries: list[str], team: str | None, limit: int) -> list[dict]:
     """
     Real Slack search with seeded-data fallback.
     Uses search.messages (SLACK_USER_TOKEN) or conversations.history (SLACK_BOT_TOKEN).
     Falls back to seeded SLACK dict when no token is configured or API fails.
     """
+    role_label = team or "all"
     if not (_SLACK_BOT_TOKEN or _SLACK_USER_TOKEN):
-        return _tool_slack_search_local(queries, team, limit)
+        results = _tool_slack_search_local(queries, team, limit)
+        _log_slack_results(results, "seeded", role_label)
+        return results
     try:
         if _SLACK_USER_TOKEN:
+            _LOGGER.info(f"  Slack [{role_label}] live search.messages | queries={queries}")
             results = await asyncio.to_thread(_slack_search_via_user_token, queries, limit)
+            source = "live:user_token"
         else:
+            _LOGGER.info(f"  Slack [{role_label}] live conversations.history | queries={queries}")
             results = await asyncio.to_thread(_slack_history_search, queries, limit)
-        return results if results else _tool_slack_search_local(queries, team, limit)
+            source = "live:bot_token"
+        if results:
+            _log_slack_results(results, source, role_label)
+            return results
+        _LOGGER.info(f"  Slack [{role_label}] live API returned 0 — falling back to seeded data")
+        results = _tool_slack_search_local(queries, team, limit)
+        _log_slack_results(results, "seeded(live_empty)", role_label)
+        return results
     except Exception as exc:
-        _LOGGER.warning(f"Slack API search failed ({exc}) — using seeded data")
-        return _tool_slack_search_local(queries, team, limit)
+        _LOGGER.warning(f"  Slack [{role_label}] API error ({exc}) — using seeded data")
+        results = _tool_slack_search_local(queries, team, limit)
+        _log_slack_results(results, "seeded(api_error)", role_label)
+        return results
+
+
+def _jira_adf_to_text(adf) -> str:
+    """Flatten Jira Atlassian Document Format to plain text (best-effort)."""
+    if not adf or not isinstance(adf, dict):
+        return str(adf) if adf else ""
+    parts: list[str] = []
+
+    def _walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "text":
+                parts.append(node.get("text", ""))
+            for child in node.get("content", []):
+                _walk(child)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(adf)
+    return " ".join(parts)
+
+
+def _jira_issue_to_dict(issue: dict) -> dict:
+    f = issue.get("fields", {})
+    status   = (f.get("status") or {}).get("name", "unknown")
+    priority = (f.get("priority") or {}).get("name", "normal")
+    summary  = f.get("summary", "")
+    desc     = _jira_adf_to_text(f.get("description"))[:200]
+    key      = issue.get("key", "")
+    return {
+        "content":     f"[{key}] {summary} — {status.upper()}, {priority}. {desc}",
+        "source_id":   key,
+        "source_type": "jira",
+        "timestamp":   f.get("updated") or f.get("created") or "",
+    }
 
 
 async def _tool_jira_search(query: str, team_users: set[str] | None, limit: int) -> list[dict]:
     """
-    STUB — mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql
-    Replace body: await searchJiraIssuesUsingJql(jql=f'project = NOVA AND text ~ "{query}"')
+    Live Jira search via services/jira_service.search_tickets().
+    Fetches all open tickets in the configured project (Q126SPRINT) then trims to limit.
+    Falls back to seeded JIRA dict when API is unavailable.
     """
+    try:
+        from services.jira_service import search_tickets
+        issues = await asyncio.to_thread(search_tickets, query, limit * 4)
+        if issues:
+            results = [_jira_issue_to_dict(i) for i in issues[:limit]]
+            _LOGGER.info(
+                f"  Jira live: {len(issues)} ticket(s) from API, returning {len(results)} | "
+                f"query='{query}' project={os.getenv('JIRA_PROJECT_KEY','?')}"
+            )
+            for r in results:
+                _LOGGER.info(f"    • {r['source_id']} | {r['content'][:140]}")
+            return results
+        _LOGGER.info(f"  Jira live: 0 results for query='{query}' — falling back to seeded data")
+    except Exception as exc:
+        _LOGGER.warning(f"  Jira live search failed ({exc}) — using seeded data")
+
+    # Seeded fallback — keeps demo scenario working when API is down
     tokens = query.lower().split()
-    if not tokens:
-        return []
-    q = query.lower()
     results = []
     for ticket in JIRA.values():
         text = (ticket["title"] + " " + ticket.get("description", "")).lower()
-        assignee_match = (team_users is None) or (ticket.get("assignee") in team_users)
-        if tokens[0] in text and assignee_match:
+        if not tokens or tokens[0] in text:
             results.append({
                 "content": (
                     f"[{ticket['id']}] {ticket['title']} — "
                     f"{ticket['status'].upper()}, {ticket['priority']}. "
                     f"{ticket.get('description', '')[:160]}"
                 ),
-                "source_id": ticket["id"],
+                "source_id":   ticket["id"],
                 "source_type": "jira",
-                "timestamp": ticket.get("updated", ticket.get("created", "")),
+                "timestamp":   ticket.get("updated", ticket.get("created", "")),
             })
     return results[:limit]
 
 
 async def _tool_rag_query(query: str, role_filter: str | None, limit: int) -> list[dict]:
     """
-    Keyword search over the seed document corpus (12 JSON files).
-    Runs locally — no message-passing latency.
-    When MONGODB_URI + GEMINI_KEY are set, the historical_agent provides vector search
-    via RAGRequest; this covers the keyword fallback path during Phase 1.
+    Keyword search over the RAG corpus loaded at startup.
+    Corpus is loaded from MongoDB documents collection if available, disk files otherwise.
     """
     query_tokens = set(query.lower().split())
+    total_docs = len(_RAG_DOCS)
+
+    if total_docs == 0:
+        _LOGGER.warning(f"RAG query: corpus is EMPTY — _RAG_DOCS not loaded | query='{query}' role_filter={role_filter}")
+        return []
+
     scored: list[tuple[float, dict]] = []
+    role_filtered_out = 0
     for doc in _RAG_DOCS:
-        if role_filter and doc.get("role", "").lower() not in ("", role_filter.lower()):
+        doc_role = doc.get("role", "").lower()
+        if role_filter and doc_role not in ("", role_filter.lower()):
+            role_filtered_out += 1
             continue
         haystack = (
             doc.get("title", "") + " " +
@@ -485,7 +574,7 @@ async def _tool_rag_query(query: str, role_filter: str | None, limit: int) -> li
         if score > 0:
             scored.append((score, doc))
     scored.sort(key=lambda x: -x[0])
-    return [
+    results = [
         {
             "content":   doc.get("content", "")[:400],
             "source_id": doc.get("id", ""),
@@ -494,6 +583,13 @@ async def _tool_rag_query(query: str, role_filter: str | None, limit: int) -> li
         }
         for _, doc in scored[:limit]
     ]
+    _LOGGER.info(
+        f"RAG query: query='{query}' | role_filter={role_filter} | "
+        f"corpus={total_docs} docs | filtered_out={role_filtered_out} | "
+        f"scored={len(scored)} | returned={len(results)} | "
+        f"top_hits={[doc.get('id', '?') for _, doc in scored[:3]]}"
+    )
+    return results
 
 
 async def _tool_google_drive_search(query: str, limit: int) -> list[dict]:
@@ -738,7 +834,7 @@ async def _gather_role_data(role: str, context_text: str | None = None) -> dict:
         _tool_jira_search(cfg["jira_query"], team_users, limit=6)
     )
     rag_task = asyncio.create_task(
-        _tool_rag_query(cfg["jira_query"], team, limit=4)
+        _tool_rag_query(context_text or cfg["jira_query"], team, limit=4)
     )
     calendar_task = asyncio.create_task(_tool_calendar_upcoming(context_text, limit=8))
 
@@ -746,16 +842,46 @@ async def _gather_role_data(role: str, context_text: str | None = None) -> dict:
         slack_task, jira_task, rag_task, calendar_task
     )
 
+    cal = calendar_results or [
+        v for v in CALENDAR.values()
+        if team_users is None or any(u in v["attendees"] for u in team_users)
+    ]
+
+    _LOGGER.info(
+        f"Gather [{role}]: slack={len(slack_results)} jira={len(jira_results)} "
+        f"rag={len(rag_results)} calendar={len(cal)} | "
+        f"rag_query='{context_text or cfg['jira_query']}' role_filter={team}"
+    )
+
+    # ── Cross-source compare dump (what goes to Gemini synthesis) ──────────
+    _LOGGER.info(f"  ↓ Cross-source context for [{role}] synthesis:")
+    if slack_results:
+        _LOGGER.info(f"    SLACK ({len(slack_results)}):")
+        for r in slack_results:
+            _LOGGER.info(f"      • {r['source_id']} | {r['content'][:140].replace(chr(10),' ')}")
+    else:
+        _LOGGER.info(f"    SLACK: (none)")
+    if jira_results:
+        _LOGGER.info(f"    JIRA ({len(jira_results)}):")
+        for r in jira_results:
+            _LOGGER.info(f"      • {r['source_id']} | {r['content'][:140].replace(chr(10),' ')}")
+    else:
+        _LOGGER.info(f"    JIRA: (none)")
+    if rag_results:
+        _LOGGER.info(f"    RAG ({len(rag_results)}):")
+        for r in rag_results:
+            _LOGGER.info(f"      • {r['source_id']} | {r['content'][:140].replace(chr(10),' ')}")
+    else:
+        _LOGGER.info(f"    RAG: (none)")
+    # ── End compare dump ───────────────────────────────────────────────────
+
     return {
         "role":           role,
         "lens":           cfg["lens"],
         "slack_messages": slack_results,
         "jira_tickets":   jira_results,
         "seed_docs":      rag_results,
-        "calendar":       calendar_results or [
-            v for v in CALENDAR.values()
-            if team_users is None or any(u in v["attendees"] for u in team_users)
-        ],
+        "calendar":       cal,
     }
 
 
@@ -818,18 +944,77 @@ Raw data:
 """
 
 
-async def _synthesize_role(role: str, raw: dict) -> dict | None:
+def _redact_raw_via_gx10(role: str, raw: dict, workflow_id: str) -> tuple[dict, dict]:
+    """
+    Send slack/jira/seed_doc content through the GX10 trust layer before it
+    leaves for cloud Gemini. Returns (redacted_raw, trust_meta) where trust_meta
+    is the GX10 response envelope (for logging / dashboard surfacing).
+    """
+    docs: list[dict[str, str]] = []
+    for m in raw.get("slack_messages", []):
+        docs.append({
+            "id": m.get("source_id", ""),
+            "owner": role,
+            "type": "slack",
+            "content": m.get("content", ""),
+        })
+    for t in raw.get("jira_tickets", []):
+        docs.append({
+            "id": t.get("source_id", ""),
+            "owner": role,
+            "type": "jira",
+            "content": t.get("content", ""),
+        })
+    for d in raw.get("seed_docs", []):
+        docs.append({
+            "id": d.get("source_id", ""),
+            "owner": role,
+            "type": "seed_doc",
+            "content": d.get("content", ""),
+        })
+
+    trust = gx10_client.redact_documents(workflow_id, docs)
+    by_id = {d["id"]: d["content"] for d in trust.get("redactedDocuments", [])}
+
+    redacted = dict(raw)
+    redacted["slack_messages"] = [
+        {**m, "content": by_id.get(m.get("source_id", ""), m.get("content", ""))}
+        for m in raw.get("slack_messages", [])
+    ]
+    redacted["jira_tickets"] = [
+        {**t, "content": by_id.get(t.get("source_id", ""), t.get("content", ""))}
+        for t in raw.get("jira_tickets", [])
+    ]
+    redacted["seed_docs"] = [
+        {**d, "content": by_id.get(d.get("source_id", ""), d.get("content", ""))}
+        for d in raw.get("seed_docs", [])
+    ]
+    return redacted, trust
+
+
+async def _synthesize_role(role: str, raw: dict, workflow_id: str = "unknown") -> dict | None:
     if not _GEMINI_KEY:
         return None
     try:
         from google.genai import types as gt
 
+        # GX10 edge trust layer — strip PII / secrets / confidential language
+        # from raw workplace data BEFORE it crosses the network to Gemini.
+        redacted_raw, trust_meta = _redact_raw_via_gx10(role, raw, workflow_id)
+        _LOGGER.info(
+            "GX10 redaction for %s | status=%s | redacted=%d fields | sentToCloud=%d docs",
+            role,
+            trust_meta.get("trustLayerStatus"),
+            trust_meta.get("sensitiveFieldsRedacted", 0),
+            trust_meta.get("rawDocumentsSentToCloud", 0),
+        )
+
         client = _get_gemini_client()
         prompt = _SYNTHESIS_TMPL.format(
             role=role,
-            lens=raw["lens"],
+            lens=redacted_raw["lens"],
             raw_data=json.dumps(
-                {k: v for k, v in raw.items() if k != "lens"},
+                {k: v for k, v in redacted_raw.items() if k != "lens"},
                 default=str,
             ),
         )
@@ -839,6 +1024,7 @@ async def _synthesize_role(role: str, raw: dict) -> dict | None:
             config=gt.GenerateContentConfig(
                 system_instruction=_SYSTEM_PROMPT,
                 response_mime_type="application/json",
+                thinking_config=gt.ThinkingConfig(thinking_budget=0),
             ),
         )
         return _validate_synthesis(json.loads(resp.text))
@@ -929,14 +1115,53 @@ Return ONLY valid JSON — no markdown:
 """
 
 
-async def _detect_contradictions(responses: list[MeetingResponse]) -> dict:
+async def _detect_contradictions(responses: list[MeetingResponse], workflow_id: str = "unknown") -> dict:
     # Always run the rule engine first — it's the safety net
     rules = _contradictions_rules(responses)
 
+    # GX10 edge contradiction pre-check — runs locally on the ASUS GX10 before
+    # any cloud call. Findings are merged into the verdict; never override rules.
+    gx10_claims = [
+        {
+            "owner": r.role,
+            "role": r.role,
+            "claim": c.claim,
+            "confidence": (
+                "high" if c.confidence >= 0.85 else
+                "medium" if c.confidence >= 0.60 else
+                "low"
+            ),
+            "sourceIds": c.source_ids,
+        }
+        for r in responses
+        for c in r.claims
+    ]
+    gx10_verdict = gx10_client.check_contradictions(workflow_id, gx10_claims)
+    gx10_contradictions: list[str] = []
+    gx10_escalation = False
+    if gx10_verdict:
+        for cd in gx10_verdict.get("contradictions", []):
+            between = " ↔ ".join(cd.get("between", [])) or "?"
+            gx10_contradictions.append(f"[GX10] {between}: {cd.get('reason', '')}")
+        gx10_escalation = bool(gx10_verdict.get("escalationRequired", False))
+        _LOGGER.info(
+            "GX10 contradiction-check | found=%d | escalation=%s",
+            len(gx10_contradictions), gx10_escalation,
+        )
+
     client = _get_gemini_client()
     if client is None or rules["contradictions"]:
-        # Rules already found contradictions — authoritative, skip the ~20s Gemini call
-        return {**rules, "stale_claims": [], "missing_owners": [], "unsupported_claims": rules.get("unsupported_claims", [])}
+        # Rules already found contradictions — authoritative, skip the ~20s Gemini call.
+        # Still merge GX10 findings on top so edge-detected contradictions surface.
+        merged = list(dict.fromkeys(rules["contradictions"] + gx10_contradictions))
+        return {
+            **rules,
+            "contradictions": merged,
+            "escalation_required": rules["escalation_required"] or gx10_escalation,
+            "stale_claims": [],
+            "missing_owners": [],
+            "unsupported_claims": rules.get("unsupported_claims", []),
+        }
 
     try:
         from google.genai import types as gt
@@ -970,24 +1195,34 @@ async def _detect_contradictions(responses: list[MeetingResponse]) -> dict:
         )
         gemini = json.loads(resp.text)
 
-        # Merge: union rule findings + Gemini findings so neither source can drop detections.
-        # Rules are authoritative on escalation_required — Gemini can only add, never remove.
+        # Merge: union rule findings + GX10 findings + Gemini findings so no
+        # source can drop detections. Rules + GX10 are authoritative on
+        # escalation_required — Gemini can only add, never remove.
         gemini_contradictions  = gemini.get("contradictions") or []
         gemini_unsupported     = gemini.get("unsupported_claims") or []
-        merged_contradictions  = list(dict.fromkeys(rules["contradictions"] + gemini_contradictions))
+        merged_contradictions  = list(dict.fromkeys(
+            rules["contradictions"] + gx10_contradictions + gemini_contradictions
+        ))
         merged_unsupported     = list(dict.fromkeys(rules["unsupported_claims"] + gemini_unsupported))
         return {
             "contradictions":      merged_contradictions,
             "stale_claims":        gemini.get("stale_claims") or [],
             "unsupported_claims":  merged_unsupported,
             "missing_owners":      gemini.get("missing_owners") or [],
-            "escalation_required": rules["escalation_required"] or bool(gemini.get("escalation_required")),
+            "escalation_required": rules["escalation_required"] or gx10_escalation or bool(gemini.get("escalation_required")),
             "escalation_reason":   gemini.get("escalation_reason") or rules["escalation_reason"],
             "recommended_action":  gemini.get("recommended_action") or rules["recommended_action"],
         }
     except Exception as exc:
         _LOGGER.warning(f"Gemini contradiction detection failed: {exc}")
-        return {**rules, "stale_claims": [], "missing_owners": []}
+        merged = list(dict.fromkeys(rules["contradictions"] + gx10_contradictions))
+        return {
+            **rules,
+            "contradictions": merged,
+            "escalation_required": rules["escalation_required"] or gx10_escalation,
+            "stale_claims": [],
+            "missing_owners": [],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1037,18 +1272,48 @@ def _build_passports(
 # Startup
 # ---------------------------------------------------------------------------
 
-@agent.on_event("startup")
-async def on_startup(ctx: Context):
-    global _RAG_DOCS
+def _load_rag_docs() -> tuple[list[dict], str]:
+    """
+    Load RAG corpus for keyword search.
+    Tries MongoDB first (uses already-seeded documents collection).
+    Falls back to local seed JSON files if MongoDB unavailable.
+    Returns (docs, source_label).
+    """
+    if _MONGODB_URI:
+        try:
+            from pymongo import MongoClient
+            client = MongoClient(_MONGODB_URI, serverSelectionTimeoutMS=4000)
+            docs = list(client["standin"]["documents"].find({}, {"embedding": 0, "_id": 0}))
+            client.close()
+            if docs:
+                roles_found = list({d.get("role", "<no role>") for d in docs})
+                sample_titles = [d.get("title", d.get("id", "?")) for d in docs[:5]]
+                _LOGGER.info(f"RAG load: mongodb | {len(docs)} docs | roles={roles_found} | sample_titles={sample_titles}")
+                return docs, f"mongodb ({len(docs)} docs)"
+            else:
+                _LOGGER.warning("RAG load: mongodb returned 0 docs — falling back to disk seed files")
+        except Exception as exc:
+            _LOGGER.warning(f"Could not load RAG docs from MongoDB: {exc}")
+
+    # Fallback: local seed JSON files
     seed_dir = os.path.normpath(
         os.path.join(os.path.dirname(__file__), "..", "..", "data_engineering", "seed")
     )
+    docs = []
     for path in glob.glob(os.path.join(seed_dir, "*.json")):
         try:
             with open(path, encoding="utf-8") as f:
-                _RAG_DOCS.append(json.load(f))
-        except Exception as exc:
-            ctx.logger.warning(f"Could not load seed doc {path}: {exc}")
+                docs.append(json.load(f))
+        except Exception:
+            pass
+    _LOGGER.info(f"RAG load: disk | {len(docs)} docs from {seed_dir}")
+    return docs, f"disk ({len(docs)} docs)"
+
+
+@agent.on_event("startup")
+async def on_startup(ctx: Context):
+    global _RAG_DOCS
+    _RAG_DOCS, rag_source = _load_rag_docs()
 
     connected = [k for k, v in TOOL_REGISTRY.items() if v["connected"]]
     stub_count = len(TOOL_REGISTRY) - len(connected)
@@ -1058,7 +1323,7 @@ async def on_startup(ctx: Context):
     ctx.logger.info(
         f"Gemini: {'configured' if _GEMINI_KEY else 'not configured — seeded fallback'} | "
         f"Tools: {len(connected)} connected ({', '.join(connected)}), {stub_count} stubs | "
-        f"RAG corpus: {len(_RAG_DOCS)} seed docs | "
+        f"RAG corpus: {rag_source} | "
         f"Roles: {ALL_ROLES}"
     )
     if not _MONGODB_URI:
@@ -1130,8 +1395,15 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
 
     # ── Phase 1: gather raw data per role (parallel) ──────────────────────
     t1 = time.monotonic()
+<<<<<<< HEAD
     gather_tasks = {role: asyncio.create_task(_gather_role_data(role, msg.context)) for role in roles}
     gather_results = await asyncio.gather(*gather_tasks.values(), return_exceptions=True)
+=======
+    gather_results = await asyncio.gather(
+        *[_gather_role_data(role, msg.context) for role in roles],
+        return_exceptions=True,
+    )
+>>>>>>> main
     t1_ms = int((time.monotonic() - t1) * 1000)
     raw_data: dict[str, dict] = {}
     tool_counts: dict[str, int] = {}
@@ -1159,8 +1431,10 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
     # All synthesis calls fire simultaneously; one slow Gemini response
     # does not delay the others.
     t2 = time.monotonic()
+    # Each role's raw data is redacted via the GX10 edge trust layer inside
+    # _synthesize_role before it ever reaches Gemini.
     synth_results = await asyncio.gather(
-        *[_synthesize_role(role, raw_data[role]) for role in roles],
+        *[_synthesize_role(role, raw_data[role], workflow_id=msg.request_id) for role in roles],
         return_exceptions=True,
     )
     t2_ms = int((time.monotonic() - t2) * 1000)
@@ -1207,7 +1481,7 @@ async def _run_brief_pipeline(ctx: Context, msg: FullBriefRequest) -> FullBriefR
 
     # ── Phase 3: contradiction detection ─────────────────────────────────
     t3 = time.monotonic()
-    verdict = await _detect_contradictions(role_responses)
+    verdict = await _detect_contradictions(role_responses, workflow_id=msg.request_id)
     stale   = _check_stale(role_responses)
     t3_ms   = int((time.monotonic() - t3) * 1000)
     ctx.logger.info(
@@ -1296,7 +1570,7 @@ async def handle_verify(ctx: Context, sender: str, msg: VerifyRequest):
         f"roles={[r.role for r in msg.responses]}"
     )
     try:
-        verdict = await _detect_contradictions(msg.responses)
+        verdict = await _detect_contradictions(msg.responses, workflow_id=msg.request_id)
         stale   = _check_stale(msg.responses)
 
         passports = _build_passports(

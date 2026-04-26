@@ -1,0 +1,12 @@
+{
+  "id": "doc_go_no_go",
+  "filename": "doc_go_no_go.json",
+  "title": "Launch Alpha Go/No-Go Criteria & Timeline",
+  "type": "decision_doc",
+  "role": "Product",
+  "author": "alice.chen",
+  "timestamp": "2026-04-23T14:00:00Z",
+  "tags": ["product", "go-no-go", "launch-alpha", "criteria", "decision"],
+  "content": "GO/NO-GO CRITERIA — Launch Alpha (Checkout AI Assistant)\nAuthor: Alice Chen | Last updated: 2026-04-23 14:00 UTC\n\nLaunch target: Monday 2026-04-28 09:00 PT\nGo/no-go decision deadline: Sunday 2026-04-27 18:00 PT\n\nGO criteria (all must be met):\n1. Engineering: All P0/P1 tickets resolved, QA smoke test PASS\n2. Design: All assets delivered and engineering sign-off complete\n3. GTM: Launch email approved and scheduled\n4. Security: No open critical CVEs in checkout flow\n5. Legal: Pricing language approved\n\nNO-GO triggers (any one blocks launch):\n- Active P0 engineering blocker with no merge ETA by Sunday 18:00 PT\n- QA smoke test failing at go/no-go time\n- Legal hold on marketing materials\n\nEscalation path:\n- If NO-GO declared: delay to following Monday (2026-05-05)\n- Notify: alice.chen, derek.vasquez, priya.mehta, sam.okafor, exec-team@novaloop.io\n\nGo/no-go sync: Monday 2026-04-28 09:00 — Google Meet (all leads)",
+  "sensitive_flags": []
+}

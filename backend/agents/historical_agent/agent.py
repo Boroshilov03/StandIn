@@ -303,7 +303,10 @@ async def _synthesize(
     resp = await client.aio.models.generate_content(
         model=_GEMINI_MODEL,
         contents=prompt,
-        config=gt.GenerateContentConfig(system_instruction=_SYSTEM),
+        config=gt.GenerateContentConfig(
+            system_instruction=_SYSTEM,
+            thinking_config=gt.ThinkingConfig(thinking_budget=0),
+        ),
     )
 
     # Confidence heuristic: more sources + vector search = higher confidence

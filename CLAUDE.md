@@ -47,7 +47,7 @@ Python 3.11, local venv. No formal packaging.
 
 ```bash
 .venv\Scripts\activate          # Windows — activate before running anything
-pip install uagents==0.22.5 uagents-adapter==0.4.0 google-generativeai pymongo python-dotenv elevenlabs langchain==0.3.23 langgraph==0.3.20 langchain-openai==0.2.14
+pip install uagents==0.22.5 uagents-adapter==0.4.0 google-generativeai pymongo python-dotenv elevenlabs langchain==0.3.23 langgraph==0.3.20 langchain-openai==0.2.14 aiohttp
 ```
 
 Use exact versions — `uagents==0.22.5` is the tested-compatible release.

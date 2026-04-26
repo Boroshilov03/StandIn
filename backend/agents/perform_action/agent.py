@@ -34,13 +34,9 @@ try:
     from schemas.action_payloads import normalize_action_payload
 except Exception:
     def normalize_action_payload(action_type: str, payload: dict, context: dict):
-        """
-        Lightweight fallback normalizer for local/dev runs.
-        Returns: (ok, normalized_payload, error_message)
-        """
+        """Lightweight fallback normalizer. Returns: (ok, normalized_payload, error_message)"""
         if not isinstance(payload, dict):
             return False, {}, "Payload must be a JSON object."
-
         normalized = dict(payload)
         if action_type == "send_slack":
             owner = (context or {}).get("owner") or ""
@@ -66,25 +62,9 @@ except Exception:
     get_calendar_event = None
     list_calendar_events = None
     post_as_user = None
+    postAsBot = None
     create_jira_ticket = None
     update_jira_ticket_status = None
-
-ROOT = Path(__file__).resolve().parents[3]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-try:
-    from services.calendar_service import create_event
-    from services.calendar_service import add_reminder as add_calendar_reminder
-    from services.calendar_service import get_event as get_calendar_event
-    from services.calendar_service import list_events as list_calendar_events
-    from services.slackService import postAsUser, postAsBot
-except Exception:
-    create_event = None
-    add_calendar_reminder = None
-    get_calendar_event = None
-    list_calendar_events = None
-    postAsUser = None
 
 # ---------------------------------------------------------------------------
 # Agent
@@ -251,13 +231,13 @@ async def _action_send_slack(action_id: str, payload: dict, priority: str) -> tu
     elif raw_ch is not None:
         channel_key = str(raw_ch).strip() or None
 
-    if postAsUser is None:
+    if post_as_user is None:
         return False, "Slack service unavailable (missing dependencies or import path).", True
     if not _MONGODB_URI:
         return False, "send_slack requires MONGODB_URI for channel and user lookup.", True
 
     try:
-        response = postAsUser(user_id, text, channel_key)
+        response = post_as_user(user_id, text, channel_key)
         ts = response.get("ts", "unknown")
         resolved = response.get("channel", channel_key or "default")
         result = f"Slack message posted as {user_id} to channel={resolved}. ts={ts}"
@@ -373,13 +353,18 @@ async def _action_schedule_meeting(action_id: str, payload: dict, priority: str)
     try:
         start_time = payload.get("start_time")
         end_time = payload.get("end_time")
-        duration_minutes = int(payload.get("duration_minutes") or 0)
+        duration_minutes = int(payload.get("duration_minutes") or 30)
+        if duration_minutes <= 0:
+            duration_minutes = 30
+        if not start_time:
+            default_start = datetime.now(UTC) + timedelta(hours=1)
+            start_time = default_start.isoformat()
         if start_time and not end_time and duration_minutes > 0:
             start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
             end_time = (start_dt + timedelta(minutes=duration_minutes)).isoformat()
 
         event_details = {
-            "summary": payload.get("title", "Meeting"),
+            "summary": payload.get("title", "StandIn follow-up"),
             "description": payload.get("description", ""),
             "start": start_time,
             "end": end_time,
@@ -697,11 +682,7 @@ async def _handle_action_inner(ctx: Context, sender: str, msg: ActionRequest):
         return
 
     # ── Immediate execution ────────────────────────────────────────────────
-    exec_payload = payload
-    if msg.action_type == "send_slack":
-        exec_payload = dict(payload)
-        if not (exec_payload.get("user_id") or "").strip() and (msg.owner or "").strip():
-            exec_payload["user_id"] = msg.owner.strip()
+    exec_payload = normalized_payload
 
     try:
         success, result, stub = await handler(action_id, exec_payload, priority)
@@ -798,6 +779,25 @@ async def approve_action(ctx: Context, req: ApproveRequest) -> ApproveResponse:
         if action_type == "send_slack":
             if not (payload.get("user_id") or "").strip() and (doc.get("owner") or "").strip():
                 payload["user_id"] = doc["owner"].strip()
+
+        ok, payload, validation_error = normalize_action_payload(
+            action_type,
+            payload,
+            {
+                "owner": doc.get("owner"),
+                "title": doc.get("title"),
+                "summary": doc.get("summary"),
+                "context": "",
+                "priority": priority,
+            },
+        )
+        if not ok:
+            return ApproveResponse(
+                action_id=req.action_id,
+                action_type=action_type,
+                approved=False,
+                error=validation_error or "Invalid payload.",
+            )
 
         success, result, _ = await handler(req.action_id, payload, priority)
         _mark_approval_done(req.action_id, approved=success, result=result)
