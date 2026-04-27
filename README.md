@@ -1,4 +1,5 @@
 # StandIn
+<img width="2014" height="1226" alt="image" src="https://github.com/user-attachments/assets/bd704177-dac8-4501-ba62-a0828e79378c" />
 
 **Stop attending meetings for information. Send your StandIn.**
 
