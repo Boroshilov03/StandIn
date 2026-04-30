@@ -19,6 +19,10 @@ load_dotenv()
 
 from models import RAGRequest, RAGResponse
 try:
+    import auth0_ai
+except Exception:  # pragma: no cover — Auth0 module is optional
+    auth0_ai = None  # type: ignore[assignment]
+try:
     from services.calendar_service import list_events as list_calendar_events
 except Exception:
     list_calendar_events = None
@@ -487,6 +491,28 @@ async def _handle_rag_inner(ctx: Context, sender: str, msg: RAGRequest):
         else:
             ctx.logger.info("No documents matched — synthesising with no context")
 
+    # ── Auth0 FGA — drop docs the caller is not authorized to read ───────
+    fga_filtered_count: Optional[int] = None
+    if (
+        auth0_ai is not None
+        and auth0_ai.fga_configured()
+        and msg.user_email
+        and docs
+    ):
+        candidate_ids = [d.get("id", "") for d in docs if d.get("id")]
+        try:
+            allowed = set(auth0_ai.fga_filter_doc_ids(msg.user_email, candidate_ids))
+            before = len(docs)
+            docs = [d for d in docs if d.get("id", "") in allowed]
+            fga_filtered_count = before - len(docs)
+            if fga_filtered_count > 0:
+                ctx.logger.info(
+                    f"Auth0 FGA dropped {fga_filtered_count}/{before} docs "
+                    f"for user={msg.user_email}"
+                )
+        except Exception as exc:
+            ctx.logger.warning(f"FGA filter failed (passing all docs): {exc}")
+
     # ── Synthesis ─────────────────────────────────────────────────────────
     answer, confidence = await _synthesize(msg.question, docs, retrieval_method)
     source_ids = [d.get("id", "?") for d in docs]
@@ -498,6 +524,7 @@ async def _handle_rag_inner(ctx: Context, sender: str, msg: RAGRequest):
         source_ids=source_ids,
         confidence=confidence,
         retrieval_method=retrieval_method,
+        fga_filtered=fga_filtered_count,
     )
 
     ctx.logger.info(

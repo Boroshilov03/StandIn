@@ -32,6 +32,11 @@ from models import (
     RejectResponse,
 )
 try:
+    import auth0_ai
+except Exception:  # pragma: no cover — Auth0 module is optional
+    auth0_ai = None  # type: ignore[assignment]
+
+try:
     from schemas.action_payloads import normalize_action_payload
 except Exception:
     def normalize_action_payload(action_type: str, payload: dict, context: dict):
@@ -72,8 +77,19 @@ except Exception:
 # ---------------------------------------------------------------------------
 _SEED = os.getenv("PERFORM_ACTION_SEED", "perform_action_standin_seed_v1")
 _PORT = int(os.getenv("PERFORM_ACTION_PORT", "8008"))
-_MONGODB_URI = os.getenv("MONGODB_URI", "")
+_MONGODB_URI  = os.getenv("MONGODB_URI", "")
+_GEMINI_KEY   = os.getenv("GEMINI_API_KEY", "")
+_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 _LOGGER = logging.getLogger("perform_action")
+
+try:
+    from google import genai as _genai
+    from google.genai import types as _gtypes
+    _gemini_client = _genai.Client(api_key=_GEMINI_KEY) if _GEMINI_KEY else None
+except Exception:
+    _genai = None  # type: ignore
+    _gtypes = None  # type: ignore
+    _gemini_client = None
 
 
 def _ensure_event_loop() -> None:
@@ -109,8 +125,13 @@ def _get_db():
     return db
 
 
-# Approval gating disabled: all actions execute immediately.
-_APPROVAL_REQUIRED: set[str] = set()
+# Approval gating: actions in this set require human approval before executing.
+# Set ENABLE_APPROVAL_GATE=0 to disable for fully autonomous demos.
+_APPROVAL_REQUIRED: set[str] = (
+    {"send_slack", "send_email", "schedule_meeting"}
+    if os.getenv("ENABLE_APPROVAL_GATE", "1") != "0"
+    else set()
+)
 
 
 def _save_pending_approval(
@@ -120,6 +141,8 @@ def _save_pending_approval(
     owner: str = "", owner_name: str = "",
     ticket_status: str = "in_review", risk: str = "medium",
     stub: bool = True, escalation: dict | None = None,
+    auth0_ciba: dict | None = None,
+    chat_origin: dict | None = None,
 ) -> None:
     """Persist an action to pending_approvals collection."""
     if not _MONGODB_URI:
@@ -143,6 +166,8 @@ def _save_pending_approval(
             "risk":           risk,
             "stub":           stub,
             "escalation":     escalation or {},
+            "auth0_ciba":     auth0_ciba or {},
+            "chat_origin":    chat_origin or {},
         })
     except Exception:
         pass
@@ -674,6 +699,69 @@ async def _handle_action_inner(ctx: Context, sender: str, msg: ActionRequest):
         await ctx.send(sender, response)
         return
 
+    # ── Approval gate ──────────────────────────────────────────────────────
+    if msg.action_type in _APPROVAL_REQUIRED and _MONGODB_URI:
+        # ── Auth0 CIBA — push approval to user's phone (best-effort) ──────
+        ciba_meta: dict = {}
+        if auth0_ai and auth0_ai.ciba_configured() and msg.owner:
+            binding = (
+                f"{msg.action_type.replace('_', ' ').title()}: "
+                f"{(msg.title or msg.summary or '')[:48]}"
+            ) or "StandIn agent action"
+            try:
+                auth_req_id = auth0_ai.ciba_initiate(
+                    user_email=msg.owner,
+                    binding_message=binding,
+                )
+                if auth_req_id:
+                    ciba_meta = {
+                        "auth_req_id":     auth_req_id,
+                        "user":            msg.owner,
+                        "binding_message": binding,
+                        "initiated_at":    datetime.now(UTC).isoformat(),
+                        "state":           "pending",
+                    }
+                    ctx.logger.info(
+                        f"CIBA push sent | user={msg.owner} | action_id={action_id} | "
+                        f"auth_req_id={auth_req_id[:12]}…"
+                    )
+            except Exception as exc:
+                ctx.logger.warning(f"CIBA initiate failed: {exc}")
+
+        _save_pending_approval(
+            action_id, msg.action_type, normalized_payload, priority,
+            requested_by=sender,
+            title=msg.title or "",
+            summary=msg.summary or msg.context or "",
+            team=msg.team or "",
+            owner=msg.owner or "",
+            owner_name=msg.owner_name or "",
+            ticket_status=msg.ticket_status or "in_review",
+            risk=msg.risk or "medium",
+            stub=True,
+            auth0_ciba=ciba_meta,
+            chat_origin={"reply_to": sender, "request_id": msg.request_id},
+        )
+        ctx.logger.info(
+            f"Action queued for approval | type={msg.action_type} | id={action_id}"
+        )
+        result_msg = (
+            f"pending_approval — human must approve before this action executes. "
+            f"Call POST /approvals/approve with action_id={action_id}"
+        )
+        if ciba_meta:
+            result_msg += " (Auth0 CIBA push also sent to user's phone)"
+        response = ActionResponse(
+            request_id=msg.request_id,
+            action_type=msg.action_type,
+            success=True,
+            action_id=action_id,
+            result=result_msg,
+            stub=False,
+        )
+        await ctx.send(sender, response)
+        return
+
     # ── Immediate execution ────────────────────────────────────────────────
     exec_payload = normalized_payload
 
@@ -880,6 +968,321 @@ async def reject_action(ctx: Context, req: RejectRequest) -> RejectResponse:
     except Exception as exc:
         ctx.logger.error(f"reject_action failed: {exc}")
         return RejectResponse(action_id=req.action_id, rejected=False)
+
+
+# ---------------------------------------------------------------------------
+# Auth0 CIBA — poll the user's phone-approval state, auto-execute on approve
+# ---------------------------------------------------------------------------
+
+class _CibaPollRequest(Model):
+    action_id: str
+
+
+class _CibaPollResponse(Model):
+    action_id: str
+    state: str          # "pending" | "approved" | "denied" | "expired" | "error" | "no_ciba"
+    auth_req_id: Optional[str] = None
+    binding_message: Optional[str] = None
+    user: Optional[str] = None
+    executed: bool = False
+    result: Optional[str] = None
+    success: Optional[bool] = None
+
+
+class _Auth0StatusResponse(Model):
+    configured: bool
+    domain: Optional[str] = None
+    token_vault: bool = False
+    ciba: bool = False
+    fga: bool = False
+
+
+@agent.on_rest_get("/auth0/status", _Auth0StatusResponse)
+async def auth0_status(ctx: Context) -> _Auth0StatusResponse:
+    """Surface Auth0 AI integration state to the dashboard."""
+    if auth0_ai is None:
+        return _Auth0StatusResponse(configured=False)
+    s = auth0_ai.status_summary()
+    return _Auth0StatusResponse(
+        configured  = bool(s.get("configured")),
+        domain      = s.get("domain"),
+        token_vault = bool(s.get("token_vault")),
+        ciba        = bool(s.get("ciba")),
+        fga         = bool(s.get("fga")),
+    )
+
+
+@agent.on_rest_post("/approvals/ciba-poll", _CibaPollRequest, _CibaPollResponse)
+async def approvals_ciba_poll(ctx: Context, req: _CibaPollRequest) -> _CibaPollResponse:
+    """
+    Poll Auth0 CIBA for an action's phone-approval state. On `approved`, the
+    handler executes the action immediately — no second click needed in the UI.
+    """
+    if auth0_ai is None or not auth0_ai.ciba_configured():
+        return _CibaPollResponse(action_id=req.action_id, state="no_ciba")
+    if not _MONGODB_URI:
+        return _CibaPollResponse(action_id=req.action_id, state="error",
+                                 result="MONGODB_URI not configured")
+
+    try:
+        db  = _get_db()
+        doc = db["pending_approvals"].find_one({"action_id": req.action_id})
+        if not doc:
+            return _CibaPollResponse(action_id=req.action_id, state="error",
+                                     result="Action not found")
+
+        meta = dict(doc.get("auth0_ciba") or {})
+        auth_req_id = meta.get("auth_req_id")
+        if not auth_req_id:
+            return _CibaPollResponse(action_id=req.action_id, state="no_ciba")
+
+        # Already resolved — short-circuit
+        if doc.get("status") in ("approved", "rejected"):
+            return _CibaPollResponse(
+                action_id   = req.action_id,
+                state       = "approved" if doc["status"] == "approved" else "denied",
+                auth_req_id = auth_req_id,
+                binding_message = meta.get("binding_message"),
+                user        = meta.get("user"),
+                executed    = doc["status"] == "approved",
+                result      = doc.get("result"),
+                success     = doc["status"] == "approved",
+            )
+
+        state, _id_token = auth0_ai.ciba_poll(auth_req_id)
+        meta["state"]     = state
+        meta["polled_at"] = datetime.now(UTC).isoformat()
+        db["pending_approvals"].update_one(
+            {"action_id": req.action_id}, {"$set": {"auth0_ciba": meta}},
+        )
+
+        ctx.logger.info(
+            f"CIBA poll | id={req.action_id} | state={state} | "
+            f"user={meta.get('user')}"
+        )
+
+        if state != "approved":
+            return _CibaPollResponse(
+                action_id       = req.action_id,
+                state           = state,
+                auth_req_id     = auth_req_id,
+                binding_message = meta.get("binding_message"),
+                user            = meta.get("user"),
+            )
+
+        # ── Approved on phone — execute the action immediately ─────────────
+        action_type = doc["action_type"]
+        payload     = dict(doc.get("payload") or {})
+        priority    = doc.get("priority", "normal")
+        handler     = _ACTIONS.get(action_type)
+
+        if action_type == "send_slack" and not (payload.get("user_id") or "").strip():
+            if (doc.get("owner") or "").strip():
+                payload["user_id"] = doc["owner"].strip()
+
+        ok, payload, validation_error = normalize_action_payload(
+            action_type, payload,
+            {"owner": doc.get("owner"), "title": doc.get("title"),
+             "summary": doc.get("summary"), "context": "", "priority": priority},
+        )
+        if handler is None or not ok:
+            err = validation_error or f"No handler for '{action_type}'"
+            _mark_approval_done(req.action_id, approved=False, result=err)
+            return _CibaPollResponse(
+                action_id=req.action_id, state="error",
+                auth_req_id=auth_req_id, user=meta.get("user"),
+                result=err, success=False,
+            )
+
+        success, result, _ = await handler(req.action_id, payload, priority)
+        _mark_approval_done(req.action_id, approved=success, result=result)
+        _log_action(req.action_id, action_type, payload, success, result, stub=False)
+
+        if success:
+            _emit_notification(
+                kind="action.executed",
+                title=f"{action_type.replace('_', ' ').title()} delivered (Auth0 CIBA)",
+                body=(doc.get("title") or result or "")[:300],
+                severity="success",
+                action_id=req.action_id,
+                team=doc.get("team"), owner=doc.get("owner"),
+            )
+
+        return _CibaPollResponse(
+            action_id       = req.action_id,
+            state           = "approved",
+            auth_req_id     = auth_req_id,
+            binding_message = meta.get("binding_message"),
+            user            = meta.get("user"),
+            executed        = True,
+            result          = result,
+            success         = success,
+        )
+    except Exception as exc:
+        ctx.logger.error(f"approvals_ciba_poll failed: {exc}")
+        return _CibaPollResponse(action_id=req.action_id, state="error", result=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Background CIBA poller — auto-execute actions when user approves on phone
+# ---------------------------------------------------------------------------
+
+_CIBA_POLL_INTERVAL = float(os.getenv("CIBA_BG_POLL_INTERVAL_SECONDS", "5"))
+
+
+@agent.on_interval(period=_CIBA_POLL_INTERVAL)
+async def _ciba_background_poller(ctx: Context) -> None:
+    """Scan pending_approvals for CIBA-pending actions, poll Auth0, execute on approve."""
+    if auth0_ai is None or not auth0_ai.ciba_configured():
+        return
+    if not _MONGODB_URI:
+        return
+    # Only poll recent pending approvals — auth_req_ids expire (typically
+    # ~10 min) and stale docs from earlier runs would spam state=error.
+    max_age_minutes = float(os.getenv("CIBA_MAX_AGE_MINUTES", "10"))
+    cutoff_iso = (datetime.now(UTC) - timedelta(minutes=max_age_minutes)).isoformat()
+    try:
+        db = _get_db()
+        cursor = db["pending_approvals"].find(
+            {
+                "status": "pending",
+                "auth0_ciba.auth_req_id": {"$exists": True, "$ne": ""},
+                "created_at": {"$gte": cutoff_iso},
+            },
+            {"action_id": 1, "action_type": 1, "payload": 1, "priority": 1,
+             "owner": 1, "title": 1, "summary": 1, "team": 1, "auth0_ciba": 1,
+             "chat_origin": 1},
+        ).limit(20)
+    except Exception as exc:
+        ctx.logger.error(f"CIBA bg poll: db scan failed: {exc}")
+        return
+
+    # Sweep older still-pending CIBA rows so they don't sit forever.
+    try:
+        db["pending_approvals"].update_many(
+            {
+                "status": "pending",
+                "auth0_ciba.auth_req_id": {"$exists": True, "$ne": ""},
+                "created_at": {"$lt": cutoff_iso},
+            },
+            {"$set": {"status": "expired", "result": "ciba_expired",
+                      "resolved_at": datetime.now(UTC).isoformat()}},
+        )
+    except Exception:
+        pass
+
+    for doc in cursor:
+        action_id   = doc.get("action_id")
+        meta        = dict(doc.get("auth0_ciba") or {})
+        auth_req_id = meta.get("auth_req_id")
+        if not action_id or not auth_req_id:
+            continue
+        try:
+            state, _id_token = auth0_ai.ciba_poll(auth_req_id)
+        except Exception as exc:
+            ctx.logger.warning(f"CIBA bg poll: poll failed | id={action_id} | {exc}")
+            continue
+
+        meta["state"]     = state
+        meta["polled_at"] = datetime.now(UTC).isoformat()
+        try:
+            db["pending_approvals"].update_one(
+                {"action_id": action_id}, {"$set": {"auth0_ciba": meta}},
+            )
+        except Exception:
+            pass
+
+        if state == "pending":
+            continue
+
+        ctx.logger.info(f"CIBA bg poll | id={action_id} | state={state}")
+
+        chat_origin = dict(doc.get("chat_origin") or {})
+        reply_to    = chat_origin.get("reply_to")
+        chat_req_id = chat_origin.get("request_id")
+
+        if state in ("denied", "expired", "error"):
+            _mark_approval_done(action_id, approved=False, result=f"ciba_{state}")
+            _emit_notification(
+                kind="action.rejected",
+                title=f"{str(doc.get('action_type','')).replace('_',' ').title()} {state} on phone",
+                body=(doc.get("title") or "")[:300],
+                severity="warning",
+                action_id=action_id,
+                team=doc.get("team"), owner=doc.get("owner"),
+            )
+            if reply_to and chat_req_id:
+                try:
+                    await ctx.send(reply_to, ActionResponse(
+                        request_id=chat_req_id,
+                        action_type=doc.get("action_type", ""),
+                        success=False,
+                        action_id=action_id,
+                        result=f"ciba_{state}",
+                        stub=False,
+                    ))
+                except Exception as exc:
+                    ctx.logger.warning(f"CIBA bg poll: follow-up send failed | {exc}")
+            continue
+
+        if state != "approved":
+            continue
+
+        # Approved — execute the action.
+        action_type = doc.get("action_type", "")
+        payload     = dict(doc.get("payload") or {})
+        priority    = doc.get("priority", "normal")
+        handler     = _ACTIONS.get(action_type)
+
+        if action_type == "send_slack" and not (payload.get("user_id") or "").strip():
+            if (doc.get("owner") or "").strip():
+                payload["user_id"] = doc["owner"].strip()
+
+        ok, payload, validation_error = normalize_action_payload(
+            action_type, payload,
+            {"owner": doc.get("owner"), "title": doc.get("title"),
+             "summary": doc.get("summary"), "context": "", "priority": priority},
+        )
+        if handler is None or not ok:
+            err = validation_error or f"No handler for '{action_type}'"
+            _mark_approval_done(action_id, approved=False, result=err)
+            ctx.logger.error(f"CIBA bg poll: cannot execute | id={action_id} | {err}")
+            continue
+
+        try:
+            success, result, _ = await handler(action_id, payload, priority)
+        except Exception as exc:
+            success, result = False, f"handler error: {exc}"
+
+        _mark_approval_done(action_id, approved=success, result=result)
+        _log_action(action_id, action_type, payload, success, result, stub=False)
+        ctx.logger.info(
+            f"CIBA bg poll: executed | id={action_id} | type={action_type} | "
+            f"success={success} | result={(result or '')[:300]}"
+        )
+
+        if success:
+            _emit_notification(
+                kind="action.executed",
+                title=f"{action_type.replace('_', ' ').title()} delivered (Auth0 CIBA)",
+                body=(doc.get("title") or result or "")[:300],
+                severity="success",
+                action_id=action_id,
+                team=doc.get("team"), owner=doc.get("owner"),
+            )
+
+        if reply_to and chat_req_id:
+            try:
+                await ctx.send(reply_to, ActionResponse(
+                    request_id=chat_req_id,
+                    action_type=action_type,
+                    success=success,
+                    action_id=action_id,
+                    result=result,
+                    stub=False,
+                ))
+            except Exception as exc:
+                ctx.logger.warning(f"CIBA bg poll: follow-up send failed | {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -1240,16 +1643,204 @@ def _peer_for_team(team: str) -> str:
     return "peer_engineering"
 
 
-def _conversation_script(action_type: str, title: str, owner: str, team: str, summary: str) -> list[dict]:
-    """
-    Returns an ordered list of messages: {from, to, kind, content, delay_ms}.
+# ---------------------------------------------------------------------------
+# Gemini-powered conversation generator
+# ---------------------------------------------------------------------------
 
-    Models a cross-org agent-to-agent (A2A) negotiation: our user's
-    orchestrator opens a channel with the *counterparty user's* StandIn
-    orchestrator (e.g. Engineering's StandIn, Design's StandIn). Internal
-    helpers (status / historical) chime in only when our orchestrator needs
-    grounding, so the dialog reads as peer-to-peer.
+_CONV_AGENT_PERSONAS = {
+    "orchestrator":     "You are StandIn's Orchestrator — a concise, decisive coordinator who routes work, proposes resolutions, and keeps the conversation moving. You never waffle.",
+    "status_agent":     "You are StandIn's Status Agent — a data-grounded analyst. You answer factually about current role status, blockers, and confidence. Short, direct, no speculation.",
+    "historical_agent": "You are StandIn's Historical Agent — an institutional-memory specialist. You cite prior incidents, resolution patterns, and time-to-unblock from the knowledge base.",
+    "perform_action":   "You are StandIn's Perform Action agent — an executor. You confirm tool calls, report outcomes, and link results to evidence passports. Terse, operational.",
+    "peer_engineering": "You represent Engineering's StandIn agent — a peer orchestrator in another org. You speak for the Engineering team's current blockers, owners, and availability.",
+    "peer_design":      "You represent Design's StandIn agent. You speak for the Design team's readiness, dependencies, and capacity. You're collaborative but guard scope creep.",
+    "peer_gtm":         "You represent GTM's StandIn agent. You speak for the GTM team's launch readiness and timeline pressure. Focused on go/no-go criteria.",
+    "peer_product":     "You represent Product's StandIn agent. You coordinate between teams and hold the launch decision authority.",
+}
+
+_CONV_SKELETONS: dict[str, list[dict]] = {
+    "send_slack": [
+        {"from": "orchestrator",  "to": "{peer}",        "kind": "handshake"},
+        {"from": "{peer}",        "to": "orchestrator",  "kind": "finding"},
+        {"from": "orchestrator",  "to": "status_agent",  "kind": "delegate"},
+        {"from": "status_agent",  "to": "orchestrator",  "kind": "finding"},
+        {"from": "orchestrator",  "to": "{peer}",        "kind": "decision"},
+        {"from": "orchestrator",  "to": "perform_action","kind": "delegate"},
+        {"from": "perform_action","to": "orchestrator",  "kind": "tool_call"},
+        {"from": "perform_action","to": "orchestrator",  "kind": "completed"},
+    ],
+    "draft_slack": [
+        {"from": "orchestrator",  "to": "{peer}",        "kind": "handshake"},
+        {"from": "{peer}",        "to": "orchestrator",  "kind": "finding"},
+        {"from": "orchestrator",  "to": "perform_action","kind": "delegate"},
+        {"from": "perform_action","to": "orchestrator",  "kind": "tool_call"},
+        {"from": "perform_action","to": "orchestrator",  "kind": "completed"},
+    ],
+    "schedule_meeting": [
+        {"from": "orchestrator",      "to": "peer_engineering", "kind": "handshake"},
+        {"from": "peer_engineering",  "to": "orchestrator",     "kind": "handshake"},
+        {"from": "orchestrator",      "to": "peer_design",      "kind": "handshake"},
+        {"from": "peer_design",       "to": "orchestrator",     "kind": "finding"},
+        {"from": "orchestrator",      "to": "historical_agent", "kind": "delegate"},
+        {"from": "historical_agent",  "to": "orchestrator",     "kind": "finding"},
+        {"from": "orchestrator",      "to": "peer_engineering", "kind": "decision"},
+        {"from": "peer_engineering",  "to": "orchestrator",     "kind": "decision"},
+        {"from": "peer_design",       "to": "orchestrator",     "kind": "decision"},
+        {"from": "orchestrator",      "to": "perform_action",   "kind": "delegate"},
+        {"from": "perform_action",    "to": "orchestrator",     "kind": "tool_call"},
+        {"from": "perform_action",    "to": "orchestrator",     "kind": "completed"},
+    ],
+    "send_email": [
+        {"from": "orchestrator",  "to": "{peer}",        "kind": "handshake"},
+        {"from": "{peer}",        "to": "orchestrator",  "kind": "finding"},
+        {"from": "orchestrator",  "to": "perform_action","kind": "decision"},
+        {"from": "perform_action","to": "orchestrator",  "kind": "tool_call"},
+        {"from": "perform_action","to": "orchestrator",  "kind": "completed"},
+    ],
+    "create_jira": [
+        {"from": "orchestrator",  "to": "{peer}",        "kind": "handshake"},
+        {"from": "{peer}",        "to": "orchestrator",  "kind": "finding"},
+        {"from": "orchestrator",  "to": "perform_action","kind": "decision"},
+        {"from": "perform_action","to": "orchestrator",  "kind": "tool_call"},
+        {"from": "perform_action","to": "orchestrator",  "kind": "completed"},
+    ],
+    "update_jira_status": [
+        {"from": "orchestrator",  "to": "{peer}",        "kind": "handshake"},
+        {"from": "{peer}",        "to": "orchestrator",  "kind": "finding"},
+        {"from": "orchestrator",  "to": "perform_action","kind": "decision"},
+        {"from": "perform_action","to": "orchestrator",  "kind": "tool_call"},
+        {"from": "perform_action","to": "orchestrator",  "kind": "completed"},
+    ],
+}
+
+_CONV_KIND_HINTS = {
+    "handshake": "Opening the A2A channel, establishing shared context or confirming readiness.",
+    "finding":   "Reporting a concrete fact, status, or data point relevant to the decision.",
+    "delegate":  "Handing off a sub-task to a specialist agent with clear scope.",
+    "decision":  "Proposing or confirming an action, resolution, or next step.",
+    "tool_call": "Reporting the exact tool invoked and its parameters (terse, technical).",
+    "completed": "Confirming the action completed and linking to the evidence passport or audit trail.",
+}
+
+
+async def _gemini_fill_conversation(
+    skeleton: list[dict],
+    context: dict,
+) -> list[dict]:
     """
+    Ask Gemini to fill in `content` for each step in the skeleton.
+    Returns the completed steps list. Raises on failure — caller catches and falls back.
+    """
+    if not _gemini_client:
+        raise RuntimeError("Gemini not configured")
+
+    personas_used = sorted({s["from"] for s in skeleton} | {s["to"] for s in skeleton})
+    personas_block = "\n".join(
+        f"  {pid}: {_CONV_AGENT_PERSONAS[pid]}"
+        for pid in personas_used
+        if pid in _CONV_AGENT_PERSONAS
+    )
+
+    skeleton_block = json.dumps([
+        {"step": i + 1, "from": s["from"], "to": s["to"], "kind": s["kind"],
+         "kind_hint": _CONV_KIND_HINTS.get(s["kind"], "")}
+        for i, s in enumerate(skeleton)
+    ], indent=2)
+
+    prompt = f"""You are generating a realistic agent-to-agent (A2A) conversation for StandIn, an AI agent network that coordinates workplace actions without human meetings.
+
+## Action context
+- action_type: {context['action_type']}
+- title: {context['title']}
+- owner: {context['owner']}
+- team: {context['team']}
+- summary: {context['summary']}
+- risk: {context.get('risk', 'medium')}
+
+## Agent personas (stay in character for each agent)
+{personas_block}
+
+## Conversation skeleton
+Fill in the `content` field for each step. The structure is fixed — only generate content.
+Constraints:
+- Each message must be 1-3 sentences max. No padding, no pleasantries.
+- Content must be contextually grounded in the action above (reference owner, title, team where natural).
+- tool_call steps: use format "tool.method → params" (e.g. "slack.post_message → @derek.vasquez #launch-alpha")
+- completed steps: confirm outcome and mention evidence passport or action log.
+- Be specific — avoid generic filler like "understood" or "acknowledged" alone.
+- Output ONLY a JSON array matching this schema exactly:
+
+{skeleton_block}
+
+Return ONLY a JSON array of objects with keys: step, from, to, kind, content, delay_ms.
+delay_ms should be between 600 and 1400, varying naturally.
+No markdown, no explanation, no wrapper object — just the raw JSON array."""
+
+    resp = await _gemini_client.aio.models.generate_content(
+        model=_GEMINI_MODEL,
+        contents=prompt,
+        config=_gtypes.GenerateContentConfig(
+            temperature=0.7,
+            response_mime_type="application/json",
+        ),
+    )
+    raw = resp.text.strip()
+    # Strip markdown fences if present
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    steps = json.loads(raw.strip())
+    if not isinstance(steps, list) or len(steps) != len(skeleton):
+        raise ValueError(f"Gemini returned {len(steps)} steps, expected {len(skeleton)}")
+    # Merge generated content back onto skeleton (preserve from/to/kind)
+    result = []
+    for skel, gen in zip(skeleton, steps):
+        result.append({
+            "from":     skel["from"],
+            "to":       skel["to"],
+            "kind":     skel["kind"],
+            "content":  str(gen.get("content", "")).strip(),
+            "delay_ms": max(400, min(int(gen.get("delay_ms", 900)), 1600)),
+        })
+    return result
+
+
+async def _build_conversation_script(
+    action_type: str, title: str, owner: str, team: str, summary: str,
+    risk: str = "medium",
+) -> list[dict]:
+    """
+    Primary entry-point. Tries Gemini first; falls back to deterministic script.
+    """
+    primary_peer = _peer_for_team(team)
+    skel_key = action_type if action_type in _CONV_SKELETONS else "send_slack"
+    skeleton = [
+        {k: (v.replace("{peer}", primary_peer) if isinstance(v, str) else v)
+         for k, v in step.items()}
+        for step in _CONV_SKELETONS[skel_key]
+    ]
+    ctx_data = {
+        "action_type": action_type,
+        "title":       title or action_type.replace("_", " ").title(),
+        "owner":       owner or "owner",
+        "team":        team or "team",
+        "summary":     (summary or "")[:400],
+        "risk":        risk,
+    }
+    try:
+        steps = await _gemini_fill_conversation(skeleton, ctx_data)
+        _LOGGER.info(
+            f"Conversation script generated by Gemini | action={action_type} | steps={len(steps)}"
+        )
+        return steps
+    except Exception as exc:
+        _LOGGER.warning(f"Gemini conversation generation failed ({exc}) — using fallback")
+        return _conversation_script_fallback(action_type, title, owner, team, summary)
+
+
+def _conversation_script_fallback(action_type: str, title: str, owner: str, team: str, summary: str) -> list[dict]:
+    """Deterministic fallback — returned only when Gemini is unavailable or fails."""
     owner_label = owner or "owner"
     team_label  = team or "team"
     title_label = title or action_type.replace("_", " ").title()
@@ -1509,7 +2100,14 @@ async def start_conversation(ctx: Context, req: _ConvStartReq) -> _ConvStartResp
     except Exception as exc:
         ctx.logger.warning(f"start_conversation lookup failed: {exc}")
 
-    script       = _conversation_script(action_type, title, owner, team, summary)
+    risk = "medium"
+    try:
+        doc2 = _get_db()["pending_approvals"].find_one({"action_id": req.action_id}, {"risk": 1})
+        risk = (doc2 or {}).get("risk", "medium") or "medium"
+    except Exception:
+        pass
+
+    script       = await _build_conversation_script(action_type, title, owner, team, summary, risk)
     participants = sorted({s["from"] for s in script} | {s["to"] for s in script})
     conversation_id = f"conv-{uuid.uuid4().hex[:10]}"
 
@@ -1529,9 +2127,10 @@ async def start_conversation(ctx: Context, req: _ConvStartReq) -> _ConvStartResp
         )
 
     asyncio.create_task(_run_conversation(conversation_id, script, req.action_id))
+    source = "gemini" if _gemini_client else "fallback"
     ctx.logger.info(
         f"Conversation started | id={conversation_id} | action={req.action_id} | "
-        f"type={action_type} | steps={len(script)}"
+        f"type={action_type} | steps={len(script)} | script_source={source}"
     )
     return _ConvStartResp(
         conversation_id=conversation_id, action_id=req.action_id, status="running",

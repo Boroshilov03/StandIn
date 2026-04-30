@@ -177,6 +177,164 @@ function NotificationBell() {
   );
 }
 
+// ── Auth0 helpers ────────────────────────────────────────────────────────────
+
+function _decodeJwtPayload(token) {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(b64));
+  } catch (_) { return null; }
+}
+
+function _readAuth0User() {
+  try { return JSON.parse(localStorage.getItem('auth0_user') || 'null'); } catch (_) { return null; }
+}
+
+function _writeAuth0User(u) {
+  if (u) localStorage.setItem('auth0_user', JSON.stringify(u));
+  else localStorage.removeItem('auth0_user');
+}
+
+// Parse id_token from hash on page load (implicit flow callback)
+(function _handleAuth0Callback() {
+  const hash = window.location.hash.slice(1);
+  if (!hash.includes('id_token=')) return;
+  const params = Object.fromEntries(hash.split('&').map(p => p.split('=')));
+  const idToken = params['id_token'];
+  if (!idToken) return;
+  const payload = _decodeJwtPayload(idToken);
+  if (payload?.email) {
+    _writeAuth0User({ email: payload.email, sub: payload.sub, name: payload.name || payload.email });
+    window.history.replaceState({}, document.title, window.location.pathname);
+  }
+})();
+
+function Auth0Chip() {
+  const [status, setStatus]   = useState(window.MOCK_API.getAuth0Status());
+  const [cfg, setCfg]         = useState(null);   // {domain, client_id}
+  const [user, setUser]       = useState(_readAuth0User);
+  const [open, setOpen]       = useState(false);
+
+  useEffect(() => window.MOCK_API.onAuth0Status(setStatus), []);
+
+  // Fetch public SPA config from serve.py
+  useEffect(() => {
+    fetch('/auth0-config')
+      .then(r => r.json())
+      .then(d => { if (d.domain && d.client_id) setCfg(d); })
+      .catch(() => {});
+  }, []);
+
+  function login() {
+    if (!cfg) return;
+    const nonce  = Math.random().toString(36).slice(2);
+    const params = new URLSearchParams({
+      response_type: 'id_token',
+      client_id:     cfg.client_id,
+      redirect_uri:  window.location.origin,
+      scope:         'openid email profile',
+      nonce,
+    });
+    window.location.href = `https://${cfg.domain}/authorize?${params}`;
+  }
+
+  function logout() {
+    _writeAuth0User(null);
+    setUser(null);
+    if (cfg) {
+      window.location.href =
+        `https://${cfg.domain}/v2/logout?client_id=${cfg.client_id}&returnTo=${encodeURIComponent(window.location.origin)}`;
+    }
+  }
+
+  // Expose logged-in email to mock-api so brief calls include it
+  useEffect(() => {
+    window.__auth0User = user;
+    if (user?.email) window.MOCK_API.setAuth0UserEmail?.(user.email);
+  }, [user]);
+
+  const live = status.configured;
+  const canLogin = !!cfg?.client_id;
+  const features = [
+    { id: 'tv',   on: status.token_vault, short: 'TV',   label: 'Token Vault',
+      desc: 'Status agent uses each user\'s own Slack/Jira tokens, not a shared service account.' },
+    { id: 'ciba', on: status.ciba,        short: 'CIBA', label: 'Async Authz (CIBA)',
+      desc: 'Approval requests pushed to the user\'s phone before perform_action sends Slack/email.' },
+    { id: 'fga',  on: status.fga,         short: 'FGA',  label: 'Fine-Grained Authz',
+      desc: 'Historical agent only retrieves documents the user is authorized to read.' },
+  ];
+
+  return (
+    <div className="auth0-chip-wrap">
+      <button
+        className={`auth0-chip ${live ? 'live' : 'off'}`}
+        onClick={() => setOpen(o => !o)}
+        title={live ? `Auth0 AI · ${status.domain}` : 'Auth0 AI not configured — see AUTH0_SETUP.md'}
+      >
+        <span className="auth0-dot"/>
+        <span className="auth0-label">Auth0 AI</span>
+        {user && <span className="auth0-user-badge" title={user.email}>⬤ {user.email.split('@')[0]}</span>}
+        <span className="auth0-feats">
+          {features.map(f => (
+            <span key={f.id} className={`auth0-feat ${f.on ? 'on' : 'off'}`}>{f.short}</span>
+          ))}
+        </span>
+      </button>
+      {open && (
+        <div className="auth0-detail">
+          <div className="auth0-detail-head">
+            <strong>Auth0 for AI Agents</strong>
+            <span className={`auth0-state ${live ? 'live' : 'off'}`}>
+              {live ? `Live · ${status.domain}` : 'Not configured'}
+            </span>
+          </div>
+
+          {/* User identity */}
+          <div className="auth0-identity">
+            {user ? (
+              <div className="auth0-identity-row">
+                <span className="auth0-identity-email">
+                  <span className="auth0-identity-dot"/>
+                  {user.email}
+                </span>
+                <button className="auth0-btn-sm auth0-btn-logout" onClick={logout}>Sign out</button>
+              </div>
+            ) : (
+              <div className="auth0-identity-row">
+                <span className="auth0-identity-anon">No user signed in</span>
+                <button
+                  className={`auth0-btn-sm auth0-btn-login ${!canLogin ? 'disabled' : ''}`}
+                  onClick={canLogin ? login : undefined}
+                  title={!canLogin ? 'Set AUTH0_SPA_CLIENT_ID in .env first' : 'Sign in via Auth0'}
+                >
+                  {canLogin ? 'Sign in' : 'No SPA client'}
+                </button>
+              </div>
+            )}
+          </div>
+
+          <ul className="auth0-feat-list">
+            {features.map(f => (
+              <li key={f.id} className={f.on ? 'on' : 'off'}>
+                <span className="auth0-feat-name">{f.label}</span>
+                <span className="auth0-feat-state">{f.on ? 'ENABLED' : 'off'}</span>
+                <span className="auth0-feat-desc">{f.desc}</span>
+              </li>
+            ))}
+          </ul>
+          {!canLogin && live && (
+            <div className="auth0-hint">
+              Create a <strong>Single Page Application</strong> in the Auth0 dashboard,
+              then add <code>AUTH0_SPA_CLIENT_ID=&lt;client_id&gt;</code> to <code>.env</code>
+              and restart <code>serve.py</code>.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HealthBar({ route, setRoute, counts, onBackToLanding }) {
   useEffect(() => {
     const t = setInterval(() => window.MOCK_API.healthAgents(), 8000);
@@ -236,6 +394,7 @@ function HealthBar({ route, setRoute, counts, onBackToLanding }) {
         ))}
       </nav>
       <div className="healthbar-spacer"/>
+      <Auth0Chip/>
       <NotificationBell/>
       {statusClass !== 'demo' && (
         <div

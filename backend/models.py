@@ -178,6 +178,7 @@ class RAGRequest(Model):
     question: str
     role_filter: Optional[str] = None   # "Engineering" | "Design" | etc.
     top_k: Optional[int] = 5
+    user_email: Optional[str] = None    # caller's identity — used for Auth0 FGA filtering
 
 
 class RAGResponse(Model):
@@ -187,6 +188,7 @@ class RAGResponse(Model):
     source_ids: List[str]
     confidence: float
     retrieval_method: str   # "vector_search" | "keyword" | "no_results"
+    fga_filtered: Optional[int] = None  # count of docs dropped by Auth0 FGA (None = FGA not applied)
 
 
 class GX10RedactedSource(Model):

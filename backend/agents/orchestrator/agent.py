@@ -197,6 +197,12 @@ def _build_demo_personas() -> dict[str, dict]:
 DEMO_PERSONAS: dict[str, dict] = _build_demo_personas()
 DEMO_PERSONA_ID = os.getenv("ORCHESTRATOR_DEMO_USER_ID", "user_alice").strip()
 DEMO_PERSONA = DEMO_PERSONAS.get(DEMO_PERSONA_ID) or next(iter(DEMO_PERSONAS.values()))
+# Override the persona's email with AUTH0_DEMO_EMAIL so CIBA pushes land on the
+# device enrolled for that Auth0 user. Without this, owner=alice@standin.ai which
+# has no Auth0 user → CIBA silently no-ops and falls back to "no approval".
+_AUTH0_DEMO_EMAIL = os.getenv("AUTH0_DEMO_EMAIL", "").strip()
+if _AUTH0_DEMO_EMAIL:
+    DEMO_PERSONA = {**DEMO_PERSONA, "email": _AUTH0_DEMO_EMAIL}
 
 TEAM_ALIASES = {
     "engineering": "Engineering",
@@ -844,7 +850,7 @@ async def _dispatch_followup_create_jira(
             title=payload["summary"],
             summary=description,
             team=ctx_data.get("team") or "Engineering",
-            owner=persona["id"],
+            owner=persona.get("email") or persona["id"],
             owner_name=persona["name"],
             risk="high",
         ),
@@ -1062,7 +1068,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
                     title=base_payload.get("title") or base_payload.get("summary") or "",
                     summary=base_payload.get("description") or user_text,
                     team=(schedule_meta or {}).get("team") or "",
-                    owner=DEMO_PERSONA["id"],
+                    owner=DEMO_PERSONA.get("email") or DEMO_PERSONA["id"],
                     owner_name=DEMO_PERSONA["name"],
                 ),
             )
@@ -1146,25 +1152,46 @@ async def handle_history_response(ctx: Context, sender: str, msg: RAGResponse):
 @orchestrator.on_message(ActionResponse)
 async def handle_action_response(ctx: Context, sender: str, msg: ActionResponse):
     import time
-    rtt = int((time.monotonic() - _request_sent_at.pop(msg.request_id, time.monotonic())) * 1000)
+    is_pending_approval = (msg.result or "").lower().startswith("pending_approval")
+    is_ciba_terminal    = (msg.result or "").lower().startswith("ciba_")
+    # Keep timer for the eventual final response — only pop on terminal.
+    if is_pending_approval:
+        rtt = int((time.monotonic() - _request_sent_at.get(msg.request_id, time.monotonic())) * 1000)
+    else:
+        rtt = int((time.monotonic() - _request_sent_at.pop(msg.request_id, time.monotonic())) * 1000)
     ctx.logger.info(
         f"← ActionResponse | id={msg.request_id} | rtt={rtt}ms | type={msg.action_type} | "
-        f"success={msg.success} | stub={msg.stub} | action_id={msg.action_id}"
+        f"success={msg.success} | stub={msg.stub} | action_id={msg.action_id} | "
+        f"pending_approval={is_pending_approval}"
     )
-    pending = pending_requests.pop(msg.request_id, None)
+    # On the initial pending_approval response, keep pending_requests so the
+    # follow-up (after phone approval) can still find the original chat sender.
+    if is_pending_approval:
+        pending = pending_requests.get(msg.request_id)
+    else:
+        pending = pending_requests.pop(msg.request_id, None)
     if not pending:
         return
 
     reply_text = _format_action_response(msg)
 
-    if msg.action_type in {"send_slack", "draft_slack"} and msg.success:
+    if msg.action_type in {"send_slack", "draft_slack"}:
         payload = pending.get("action_payload") or {}
         channel = _friendly_channel_name(str(payload.get("channel", "")))
-        reply_text = f"Message has been sent in {channel}."
+        if is_pending_approval:
+            reply_text = (
+                f"Approval requested — I sent a push to your phone. "
+                f"Once you approve, the message will post to {channel}."
+            )
+        elif is_ciba_terminal and not msg.success:
+            state = (msg.result or "").split("ciba_", 1)[-1] or "rejected"
+            reply_text = f"Phone approval {state} — message was not sent."
+        elif msg.success:
+            reply_text = f"Message has been sent in {channel}."
 
     # For schedule_meeting, reply only with scheduling confirmation.
     # Do not auto-prompt Jira creation.
-    if msg.action_type == "schedule_meeting" and msg.success:
+    if msg.action_type == "schedule_meeting" and msg.success and not is_pending_approval:
         meta = pending.get("schedule_meta") or {}
         # Pull calendar event identifiers from the success result if perform_action
         # surfaced them (currently included in the result string).
@@ -1202,7 +1229,7 @@ async def handle_action_response(ctx: Context, sender: str, msg: ActionResponse)
         if calendar_link:
             reply_text += f"\nCalendar link: {calendar_link}"
 
-    if msg.action_type == "create_jira" and msg.success:
+    if msg.action_type == "create_jira" and msg.success and not is_pending_approval:
         reply_text += (
             f"\n\nTicket created on behalf of {DEMO_PERSONA['name']} ({DEMO_PERSONA['team']})."
         )

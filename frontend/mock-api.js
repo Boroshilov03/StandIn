@@ -337,10 +337,44 @@ window.MOCK_API = (() => {
     _flashTool(_toolKey(agent, tool));
   }
 
+  // ── Auth0 AI ──────────────────────────────────────────────────────────
+  let _auth0UserEmail = null;
+
+  // ── Auth0 AI status — Token Vault / CIBA / FGA ─────────────────────────
+  let _auth0Status = { configured: false, token_vault: false, ciba: false, fga: false, domain: null };
+  let _auth0Listeners = new Set();
+  async function _refreshAuth0Status() {
+    try {
+      const data = await _get(`${BASE.perform}/auth0/status`);
+      _auth0Status = {
+        configured:   !!data.configured,
+        domain:       data.domain || null,
+        token_vault:  !!data.token_vault,
+        ciba:         !!data.ciba,
+        fga:          !!data.fga,
+      };
+    } catch (_) { /* keep last known */ }
+    for (const fn of _auth0Listeners) { try { fn(_auth0Status); } catch (_) {} }
+  }
+  _refreshAuth0Status();
+  setInterval(_refreshAuth0Status, 15000);
+
+  async function _cibaPoll(actionId) {
+    try {
+      return await _post(`${BASE.perform}/approvals/ciba-poll`, { action_id: actionId });
+    } catch (_) {
+      return { action_id: actionId, state: 'error' };
+    }
+  }
+
   // ── Public API ──────────────────────────────────────────────────────────
 
   return {
     TEAMS,
+    getAuth0Status: () => ({ ..._auth0Status }),
+    onAuth0Status: (fn) => { _auth0Listeners.add(fn); fn({ ..._auth0Status }); return () => _auth0Listeners.delete(fn); },
+    refreshAuth0Status: _refreshAuth0Status,
+    cibaPoll: _cibaPoll,
 
     listUsers:     () => _users.slice(),
     listEdges:     () => _edges.slice(),
@@ -537,9 +571,15 @@ window.MOCK_API = (() => {
       try { await _post(`${BASE.perform}/notifications/mark_read`, { all: true }); } catch (_) {}
     },
 
+    // ── Auth0 user identity (set by Auth0Chip on login) ──────────────────
+    setAuth0UserEmail: (email) => { _auth0UserEmail = email || null; },
+    getAuth0UserEmail: () => _auth0UserEmail,
+
     // ── Brief & RAG HTTP endpoints ────────────────────────────────────────
 
     fetchBrief: async (topic, userEmail = 'demo@standin.ai') => {
+      // Prefer the Auth0-authenticated identity when available
+      const effectiveEmail = _auth0UserEmail || userEmail;
       // Step 0: user → orch
       _liveTrace = { scenario: 'status', step: 0, tools: [] };
       // Step 1: orch → status (FullBriefRequest)
@@ -551,7 +591,7 @@ window.MOCK_API = (() => {
       // Step 4: contradict + passports
       const t4 = setTimeout(() => { if (_liveTrace?.scenario === 'status') _liveTrace = { scenario: 'status', step: 4, tools: ['status.contradict', 'status.passports'] }; }, 5000);
       try {
-        const result = await _postLong(`${BASE.status}/brief`, { topic, user_email: userEmail });
+        const result = await _postLong(`${BASE.status}/brief`, { topic, user_email: effectiveEmail });
         clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4);
         // Step 5: status → orch (FullBriefResponse)
         _liveTrace = { scenario: 'status', step: 5, tools: [] };
